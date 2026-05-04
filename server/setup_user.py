@@ -7,7 +7,7 @@ import os
 from passlib.context import CryptContext
 
 DB = '/app/data/metrics.db'
-pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
+pwd_context = CryptContext(schemes=['argon2'], deprecated='auto')
 
 def setup_user(username: str, password: str):
     """Create or update a user account."""

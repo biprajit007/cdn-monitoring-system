@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Response, Cookie, Depends
+from fastapi import FastAPI, Header, HTTPException, Cookie, Depends, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -50,10 +50,6 @@ class MetricIn(BaseModel):
     connection_count: int
     ts: Optional[int] = None
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
 def verify_password(plain, hashed):
     return pwd_context.verify(plain, hashed)
 
@@ -94,7 +90,7 @@ def login_page():
     <input type='password' name='password' placeholder='Password' required><button type='submit'>Login</button></form></div></body></html>"""
 
 @app.post('/api/login')
-def api_login(username: str, password: str):
+def api_login(username: str = Form(...), password: str = Form(...)):
     user = conn.execute('SELECT hashed_password FROM users WHERE username=?', (username,)).fetchone()
     if not user or not verify_password(password, user[0]):
         logger.warning(f'Failed login attempt for user: {username}')
@@ -106,7 +102,7 @@ def api_login(username: str, password: str):
     return response
 
 @app.get('/logout')
-def logout(response: Response):
+def logout():
     response = RedirectResponse(url='/login', status_code=303)
     response.delete_cookie('token')
     logger.info('User logged out')
@@ -120,10 +116,22 @@ def dashboard(username: str = Depends(verify_token)):
     td,th{{border:1px solid #1f3b4d;padding:8px}}a{{color:#7fe8ff}}.logout{{float:right}}</style>
     </head><body><h1>CDN Monitoring System</h1><a href='/logout' class='logout'>Logout ({html.escape(username)})</a>
     <p>Endpoints: <a href='/api/latest'>/api/latest</a></p><div id='app'></div><script>
+    function cell(text){{const td=document.createElement('td'); td.textContent = text; return td;}}
     async function load(){{const r=await fetch('/api/latest');const d=await r.json();
-    let html='<table><tr><th>CDN</th><th>Host</th><th>Port</th><th>Connections</th><th>Timestamp</th></tr>';
-    for(const x of d.items){{html+=`<tr><td>${{html.escape(x.cdn_name)}}</td><td>${{html.escape(x.host)}}</td><td>${{x.target_port}}</td><td>${{x.connection_count}}</td><td>${{new Date(x.ts*1000).toLocaleString()}}</td></tr>`}}
-    html+='</table>'; document.getElementById('app').innerHTML=html;}}
+    const table=document.createElement('table');
+    const head=document.createElement('tr');
+    for (const title of ['CDN','Host','Port','Connections','Timestamp']){{head.appendChild(cell(title));}}
+    table.appendChild(head);
+    for(const x of d.items){{
+      const tr=document.createElement('tr');
+      tr.appendChild(cell(x.cdn_name));
+      tr.appendChild(cell(x.host));
+      tr.appendChild(cell(String(x.target_port)));
+      tr.appendChild(cell(String(x.connection_count)));
+      tr.appendChild(cell(new Date(x.ts*1000).toLocaleString()));
+      table.appendChild(tr);
+    }}
+    const app=document.getElementById('app'); app.replaceChildren(table);}}
     load(); setInterval(load,5000);
     </script></body></html>"""
 
