@@ -72,6 +72,15 @@ def verify_token(token: Optional[str] = Cookie(None)) -> str:
     except JWTError:
         raise HTTPException(status_code=401, detail='Invalid token')
 
+def username_from_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get('sub')
+    except JWTError:
+        return None
+
 def cleanup_old_metrics():
     cutoff = int(time.time()) - (RETENTION_DAYS * 86400)
     conn.execute('DELETE FROM metrics WHERE ts < ?', (cutoff,))
@@ -109,7 +118,10 @@ def logout():
     return response
 
 @app.get('/', response_class=HTMLResponse)
-def dashboard(username: str = Depends(verify_token)):
+def dashboard(token: Optional[str] = Cookie(None)):
+    username = username_from_token(token)
+    if not username:
+        return RedirectResponse(url='/login', status_code=303)
     cleanup_old_metrics()
     return f"""<!doctype html><html><head><title>CDN Monitor</title>
     <style>body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px}}table{{border-collapse:collapse;width:100%}}
