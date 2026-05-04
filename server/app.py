@@ -80,6 +80,12 @@ class MetricIn(BaseModel):
     connection_count: int
     ts: Optional[int] = None
 
+class MapConfigIn(BaseModel):
+    cdn_name: str
+    place_name: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+
 def verify_password(plain, hashed):
     return pwd_context.verify(plain, hashed)
 
@@ -173,15 +179,7 @@ def query_all_series(range_key: str):
     return spec, series
 
 def load_map_locations():
-    raw = {}
-    try:
-        with open(MAP_CONFIG_FILE, 'r', encoding='utf-8') as f:
-            raw = json.load(f) or {}
-    except FileNotFoundError:
-        raw = {}
-    except Exception as exc:
-        logger.warning('Failed to read map config: %s', exc)
-        raw = {}
+    raw = load_map_config_raw()
 
     resolved = []
     for cdn_name, spec in raw.items():
@@ -209,6 +207,62 @@ def load_map_locations():
             'resolved': bool(lat is not None and lon is not None),
         })
     return resolved
+
+def load_map_config_raw():
+    try:
+        with open(MAP_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f) or {}
+            return raw if isinstance(raw, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning('Failed to read map config: %s', exc)
+        return {}
+
+def save_map_config_raw(raw):
+    os.makedirs(os.path.dirname(MAP_CONFIG_FILE), exist_ok=True)
+    with open(MAP_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(raw, f, indent=2, ensure_ascii=False, sort_keys=True)
+
+def get_latest_rows_by_cdn():
+    rows = conn.execute("""
+    SELECT ts, cdn_name, host, target_port, connection_count
+    FROM metrics
+    WHERE (cdn_name, ts) IN (
+      SELECT cdn_name, MAX(ts) FROM metrics GROUP BY cdn_name
+    )
+    ORDER BY cdn_name
+    """).fetchall()
+    return {
+        r[1]: {'ts': r[0], 'cdn_name': r[1], 'host': r[2], 'target_port': r[3], 'connection_count': r[4]}
+        for r in rows
+    }
+
+def merge_latest_with_config(default_count=0):
+    latest_rows = get_latest_rows_by_cdn()
+    configured = load_map_locations()
+    items = []
+    seen = set()
+    for item in configured:
+        row = latest_rows.get(item['cdn_name'])
+        merged = {**item}
+        if row:
+            merged.update(row)
+        else:
+            merged.update({'ts': None, 'host': '', 'target_port': None, 'connection_count': default_count})
+        items.append(merged)
+        seen.add(item['cdn_name'])
+    for cdn_name, row in latest_rows.items():
+        if cdn_name not in seen:
+            items.append({
+                'cdn_name': cdn_name,
+                'place_name': '',
+                'lat': None,
+                'lon': None,
+                'resolved': False,
+                **row,
+            })
+    return items
 
 @app.get('/login', response_class=HTMLResponse)
 def login_page():
@@ -283,6 +337,7 @@ def dashboard(token: Optional[str] = Cookie(None)):
         <a class='badge' href='/'>Home</a>
         <a class='badge' href='/map'>Bangladesh map</a>
         <a class='badge' href='/history'>History</a>
+        <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
       </div>
     </div>
@@ -321,9 +376,9 @@ def dashboard(token: Optional[str] = Cookie(None)):
       setCard(cards, 'Total connections', total, 'live latest counts');
       if(items.length){{
         const hottest = [...items].sort((a,b)=>Number(b.connection_count||0)-Number(a.connection_count||0))[0];
-        setCard(cards, 'Highest count', hottest.connection_count, hottest.cdn_name + ' · ' + hottest.host);
+        setCard(cards, 'Highest count', hottest.connection_count, hottest.cdn_name + ' · ' + (hottest.host || 'waiting for data'));
       }}
-      items.forEach(item => setCard(cards, item.cdn_name, item.connection_count, item.host + ' : ' + item.target_port));
+      items.forEach(item => setCard(cards, item.cdn_name, item.connection_count, item.ts ? ((item.host || 'live') + ' : ' + String(item.target_port ?? '--')) : 'waiting for agent'));
     }}
 
     function renderLatestTable(items){{
@@ -335,7 +390,8 @@ def dashboard(token: Optional[str] = Cookie(None)):
       table.appendChild(head);
       items.forEach(item => {{
         const tr=document.createElement('tr');
-        [item.cdn_name, item.host, String(item.target_port), String(item.connection_count), new Date(item.ts*1000).toLocaleString()].forEach(value => {{ const td=document.createElement('td'); td.textContent=value; tr.appendChild(td); }});
+        const tsText = item.ts ? new Date(item.ts*1000).toLocaleString() : 'waiting for agent';
+        [item.cdn_name, item.host || 'waiting for agent', String(item.target_port ?? '--'), String(item.connection_count ?? 0), tsText].forEach(value => {{ const td=document.createElement('td'); td.textContent=value; tr.appendChild(td); }});
         table.appendChild(tr);
       }});
       target.replaceChildren(table);
@@ -445,11 +501,15 @@ def map_page(token: Optional[str] = Cookie(None)):
     .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
     .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}}
     .grid{{display:grid;grid-template-columns:1.5fr .9fr;gap:14px}}
-    #map{{height:760px;border:1px solid #1f3b4d;border-radius:12px;overflow:hidden}}
+    #map{{height:760px;border:1px solid #1f3b4d;border-radius:12px;overflow:hidden;background:#050b12}}
     .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}}
     .item{{border-bottom:1px solid #1f3b4d;padding:10px 0}}
     .item:last-child{{border-bottom:none}}
     .muted{{opacity:.75}}
+    .row{{display:flex;align-items:center;gap:8px}}
+    .pulse-marker{{width:16px;height:16px;border-radius:999px;background:#27d36b;box-shadow:0 0 0 0 rgba(39,211,107,.65);animation:pulse 1.4s infinite;position:relative}}
+    .pulse-marker::after{{content:'';position:absolute;inset:4px;border-radius:999px;background:#b9ffd2;opacity:.95}}
+    @keyframes pulse{{0%{{box-shadow:0 0 0 0 rgba(39,211,107,.55)}}70%{{box-shadow:0 0 0 14px rgba(39,211,107,0)}}100%{{box-shadow:0 0 0 0 rgba(39,211,107,0)}}}}
     </style>
     </head><body><div class='wrap'>
     <div class='nav'>
@@ -461,6 +521,7 @@ def map_page(token: Optional[str] = Cookie(None)):
         <a class='badge' href='/'>Home</a>
         <a class='badge' href='/map'>Bangladesh map</a>
         <a class='badge' href='/history'>History</a>
+        <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
       </div>
     </div>
@@ -478,9 +539,10 @@ def map_page(token: Optional[str] = Cookie(None)):
       const r = await fetch('/api/map-config');
       const d = await r.json();
       const map = L.map('map', {{ zoomControl: true }}).setView([23.6850, 90.3563], 7);
-      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
         maxZoom: 18,
-        attribution: '&copy; OpenStreetMap contributors'
+        subdomains: 'abcd',
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
       }}).addTo(map);
       const bounds = [[20.5, 88.0], [26.8, 92.8]];
       map.fitBounds(bounds);
@@ -492,12 +554,12 @@ def map_page(token: Optional[str] = Cookie(None)):
         return;
       }}
       markers.forEach((item, idx) => {{
-        const color = ['#7fe8ff','#ff8f70','#a4ff70','#d370ff','#ffd670','#70ffd8'][idx % 6];
-        const marker = L.circleMarker([item.lat, item.lon], {{ radius: 10, color, fillColor: color, fillOpacity: 0.85, weight: 2 }}).addTo(map);
+        const icon = L.divIcon({{ className: '', html: '<div class="pulse-marker"></div>', iconSize: [16,16], iconAnchor: [8,8] }});
+        const marker = L.marker([item.lat, item.lon], {{ icon }}).addTo(map);
         marker.bindPopup(`<b>${{item.cdn_name}}</b><br>${{item.place_name}}<br>Count: ${{item.connection_count ?? 'n/a'}}`);
         const row = document.createElement('div');
         row.className = 'item';
-        row.innerHTML = '<b>' + item.cdn_name + '</b><br><span class="muted">' + item.place_name + '</span><br><span class="muted">count: ' + (item.connection_count ?? 'n/a') + '</span>';
+        row.innerHTML = '<div class="row"><span class="pulse-marker" style="display:inline-block;transform:scale(.65)"></span><b>' + item.cdn_name + '</b></div><div class="muted">' + item.place_name + '</div><div class="muted">count: ' + (item.connection_count ?? 'n/a') + '</div>';
         list.appendChild(row);
       }});
       const unresolved = (d.items || []).filter(x => !x.resolved);
@@ -510,6 +572,164 @@ def map_page(token: Optional[str] = Cookie(None)):
     }}
     initMap();
     </script></body></html>"""
+
+@app.get('/management', response_class=HTMLResponse)
+def management_page(token: Optional[str] = Cookie(None)):
+    username = username_from_token(token)
+    if not username:
+        return RedirectResponse(url='/login', status_code=303)
+    return """<!doctype html><html><head><title>CDN Monitor Management</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <style>
+    body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
+    a{{color:#7fe8ff;text-decoration:none}}
+    a:hover{{text-decoration:underline}}
+    .wrap{{max-width:1400px;margin:0 auto}}
+    .nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}}
+    .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
+    .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}}
+    .grid{{display:grid;grid-template-columns:1fr 1.1fr;gap:14px}}
+    .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}}
+    .panel h2{{margin:0 0 12px 0;font-size:18px}}
+    .muted{{opacity:.75}}
+    label{{display:block;margin:10px 0 6px}}
+    input{{width:100%;box-sizing:border-box;background:#081018;color:#d8f7ff;border:1px solid #1f3b4d;padding:10px;border-radius:6px}}
+    button{{background:#0f2a1e;color:#7bffad;border:1px solid #2c6a44;padding:10px 14px;border-radius:8px;cursor:pointer}}
+    button:hover{{background:#133523}}
+    table{{border-collapse:collapse;width:100%}}
+    td,th{{border:1px solid #1f3b4d;padding:8px;text-align:left;vertical-align:top}}
+    .dot{{display:inline-block;width:10px;height:10px;border-radius:999px;background:#27d36b;box-shadow:0 0 0 0 rgba(39,211,107,.7);animation:pulse 1.4s infinite}}
+    .dot.off{{background:#4d5963;animation:none;box-shadow:none}}
+    @keyframes pulse{{0%{{box-shadow:0 0 0 0 rgba(39,211,107,.55)}}70%{{box-shadow:0 0 0 12px rgba(39,211,107,0)}}100%{{box-shadow:0 0 0 0 rgba(39,211,107,0)}}}}
+    .row{{display:flex;align-items:center;gap:8px}}
+    .actions{{display:flex;gap:8px;flex-wrap:wrap}}
+    .small{{font-size:12px;opacity:.8}}
+    pre{{white-space:pre-wrap;background:#081018;border:1px solid #1f3b4d;border-radius:8px;padding:12px;overflow:auto}}
+    </style>
+    </head><body><div class='wrap'>
+    <div class='nav'>
+      <div>
+        <h1 style='margin:0'>Management</h1>
+        <div class='muted' style='margin-top:6px'>Add CDNs, place them on the map, and keep agent config in sync.</div>
+      </div>
+      <div class='navlinks'>
+        <a class='badge' href='/'>Home</a>
+        <a class='badge' href='/map'>Bangladesh map</a>
+        <a class='badge' href='/history'>History</a>
+        <a class='badge' href='/management'>Management</a>
+        <a class='badge' href='/logout'>Logout (__USERNAME__)</a>
+      </div>
+    </div>
+
+    <div class='grid'>
+      <div class='panel'>
+        <h2>Add / update CDN</h2>
+        <div class='small'>If a CDN is listed here but has no live count, it means no agent is sending data for that CDN_NAME yet.</div>
+        <form id='cdnForm'>
+          <label>CDN name</label><input id='cdnName' required placeholder='cdn2'>
+          <label>Place name</label><input id='placeName' placeholder='Dhaka'>
+          <label>Latitude (optional)</label><input id='lat' type='number' step='any' placeholder='23.8103'>
+          <label>Longitude (optional)</label><input id='lon' type='number' step='any' placeholder='90.4125'>
+          <div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>
+            <button type='submit'>Save CDN</button>
+            <button type='button' id='seedBtn' style='background:#0d2438;color:#7fe8ff;border-color:#1f3b4d'>Seed example CDNs</button>
+          </div>
+        </form>
+        <h3 style='margin:18px 0 8px'>Agent setup hint</h3>
+        <div class='small'>Run one agent per CDN name. Example:</div>
+        <pre>CDN_NAME=cdn2
+TARGET_PORT=443
+SERVER_ENDPOINT=http://server:18443/api/ingest
+INGEST_TOKEN=... </pre>
+      </div>
+      <div class='panel'>
+        <h2>Configured CDNs</h2>
+        <div id='configList'></div>
+      </div>
+    </div>
+    </div>
+    <script>
+    async function refreshConfig(){
+      const [cfgRes, latestRes] = await Promise.all([fetch('/api/map-config'), fetch('/api/latest')]);
+      const cfg = await cfgRes.json();
+      const latest = await latestRes.json();
+      const latestMap = new Map((latest.items || []).map(x => [x.cdn_name, x]));
+      const list = document.getElementById('configList');
+      list.replaceChildren();
+      if(!(cfg.items || []).length){
+        list.innerHTML = '<div class="muted">No CDN config yet.</div>';
+        return;
+      }
+      const table=document.createElement('table');
+      const head=document.createElement('tr');
+      ['Status','CDN','Place','Lat/Lon','Live count','Actions'].forEach(title => { const th=document.createElement('th'); th.textContent=title; head.appendChild(th); });
+      table.appendChild(head);
+      (cfg.items || []).forEach(item => {
+        const row=document.createElement('tr');
+        const live = latestMap.get(item.cdn_name);
+        const statusDot = document.createElement('span');
+        statusDot.className = 'dot' + ((live && live.ts !== null && Number(live.connection_count) > 0) ? '' : ' off');
+        const statusTd = document.createElement('td');
+        const statusWrap = document.createElement('div');
+        statusWrap.className = 'row';
+        const statusLabel = document.createElement('span');
+        statusLabel.textContent = (live && live.ts !== null) ? 'live' : 'waiting';
+        statusWrap.append(statusDot, statusLabel);
+        statusTd.appendChild(statusWrap);
+        row.appendChild(statusTd);
+
+        const cdnTd = document.createElement('td'); cdnTd.textContent = item.cdn_name; row.appendChild(cdnTd);
+        const placeTd = document.createElement('td'); placeTd.textContent = item.place_name || ''; row.appendChild(placeTd);
+        const latLonTd = document.createElement('td'); latLonTd.textContent = (item.lat != null && item.lon != null) ? item.lat + ', ' + item.lon : 'unresolved'; row.appendChild(latLonTd);
+        const liveTd = document.createElement('td'); liveTd.textContent = live ? String(live.connection_count) : '0'; row.appendChild(liveTd);
+        const actionsTd = document.createElement('td');
+        actionsTd.className = 'actions';
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.textContent = 'Delete';
+        del.onclick = async () => {
+          if(!confirm('Remove ' + item.cdn_name + '?')) return;
+          await fetch('/api/map-config/' + encodeURIComponent(item.cdn_name), { method: 'DELETE' });
+          refreshConfig();
+        };
+        actionsTd.appendChild(del);
+        row.appendChild(actionsTd);
+        table.appendChild(row);
+      });
+      list.appendChild(table);
+    }
+
+    document.getElementById('cdnForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        cdn_name: document.getElementById('cdnName').value.trim(),
+        place_name: document.getElementById('placeName').value.trim() || null,
+        lat: document.getElementById('lat').value ? Number(document.getElementById('lat').value) : null,
+        lon: document.getElementById('lon').value ? Number(document.getElementById('lon').value) : null,
+      };
+      await fetch('/api/map-config', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+      });
+      e.target.reset();
+      refreshConfig();
+    });
+
+    document.getElementById('seedBtn').addEventListener('click', async () => {
+      const seeds = [
+        {cdn_name:'cdn1', place_name:'Dhaka'},
+        {cdn_name:'cdn2', place_name:'Chattogram'},
+        {cdn_name:'cdn3', place_name:'Khulna'},
+      ];
+      for (const item of seeds) {
+        await fetch('/api/map-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(item) });
+      }
+      refreshConfig();
+    });
+
+    refreshConfig();
+    </script></body></html>""".replace('__USERNAME__', html.escape(username))
 
 @app.get('/history', response_class=HTMLResponse)
 def history_page(token: Optional[str] = Cookie(None)):
@@ -548,6 +768,7 @@ def history_page(token: Optional[str] = Cookie(None)):
         <a class='badge' href='/'>Home</a>
         <a class='badge' href='/map'>Bangladesh map</a>
         <a class='badge' href='/history'>History</a>
+        <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
       </div>
     </div>
@@ -692,18 +913,7 @@ def ingest(metric: MetricIn, x_agent_token: Optional[str] = Header(None)):
 
 @app.get('/api/latest')
 def latest():
-    rows = conn.execute("""
-    SELECT ts, cdn_name, host, target_port, connection_count
-    FROM metrics
-    WHERE (cdn_name, ts) IN (
-      SELECT cdn_name, MAX(ts) FROM metrics GROUP BY cdn_name
-    )
-    ORDER BY cdn_name
-    """).fetchall()
-    return {'items': [
-        {'ts': r[0], 'cdn_name': r[1], 'host': r[2], 'target_port': r[3], 'connection_count': r[4]}
-        for r in rows
-    ]}
+    return {'items': merge_latest_with_config()}
 
 @app.get('/api/history')
 def history(cdn_name: str, range: str = '24h'):
@@ -713,19 +923,45 @@ def history(cdn_name: str, range: str = '24h'):
 @app.get('/api/series')
 def series(range: str = '24h'):
     spec, series_data = query_all_series(range)
+    for item in load_map_locations():
+        series_data.setdefault(item['cdn_name'], [])
     return {'range': range, 'label': spec['label'], 'stepLabel': spec['stepLabel'], 'series': series_data}
 
 @app.get('/api/map-config')
 def map_config():
-    latest_rows = {r[1]: {'ts': r[0], 'connection_count': r[4], 'host': r[2], 'target_port': r[3]} for r in conn.execute("""
-    SELECT ts, cdn_name, host, target_port, connection_count
-    FROM metrics
-    WHERE (cdn_name, ts) IN (
-      SELECT cdn_name, MAX(ts) FROM metrics GROUP BY cdn_name
-    )
-    """).fetchall()}
+    latest_rows = get_latest_rows_by_cdn()
     markers = []
     for item in load_map_locations():
         latest = latest_rows.get(item['cdn_name'], {})
         markers.append({**item, **latest})
     return {'items': markers}
+
+@app.get('/api/map-config/raw')
+def map_config_raw():
+    return {'items': [{'cdn_name': k, **(v if isinstance(v, dict) else {'place_name': v})} for k, v in load_map_config_raw().items()]}
+
+@app.post('/api/map-config')
+def upsert_map_config(item: MapConfigIn, token: Optional[str] = Cookie(None)):
+    username = username_from_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail='Not authenticated')
+    raw = load_map_config_raw()
+    if item.lat is not None and item.lon is not None:
+        raw[item.cdn_name] = {'place_name': item.place_name or '', 'lat': item.lat, 'lon': item.lon}
+    else:
+        raw[item.cdn_name] = item.place_name or ''
+    save_map_config_raw(raw)
+    logger.info('Map config upserted by %s for %s', username, item.cdn_name)
+    return {'status': 'ok', 'cdn_name': item.cdn_name}
+
+@app.delete('/api/map-config/{cdn_name}')
+def delete_map_config(cdn_name: str, token: Optional[str] = Cookie(None)):
+    username = username_from_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail='Not authenticated')
+    raw = load_map_config_raw()
+    if cdn_name in raw:
+        del raw[cdn_name]
+        save_map_config_raw(raw)
+    logger.info('Map config deleted by %s for %s', username, cdn_name)
+    return {'status': 'ok', 'cdn_name': cdn_name}

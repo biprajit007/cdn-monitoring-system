@@ -8,6 +8,7 @@ A small two-service monitoring stack: an agent counts TCP connections for a targ
 - Token-protected ingest endpoint
 - SQLite-backed metric storage
 - Interactive HTML dashboard with live counts, graph, map, and history views
+- Management page for adding CDNs and map placement
 - JSON APIs for latest rows, series data, and map config
 
 ## Project structure
@@ -39,6 +40,9 @@ https://cdn-monitor.rockstreamer.com:18443/login
 ```
 
 The root URL redirects there until you log in.
+
+Use the Management page to add or edit CDN entries and map placement.
+If a CDN shows up there but has no live count, it means no agent is sending metrics with that `CDN_NAME` yet.
 
 Default first login, if bootstrap is enabled:
 
