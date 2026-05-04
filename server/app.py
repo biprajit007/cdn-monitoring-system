@@ -40,7 +40,7 @@ JWT_ALGORITHM = 'HS256'
 SESSION_HOURS = int(os.getenv('SESSION_HOURS', '24'))
 RETENTION_DAYS = int(os.getenv('RETENTION_DAYS', '30'))
 
-pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
+pwd_context = CryptContext(schemes=['argon2'], deprecated='auto')
 app = FastAPI(title='CDN Monitoring System')
 
 class MetricIn(BaseModel):
