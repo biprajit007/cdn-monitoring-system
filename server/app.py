@@ -354,6 +354,7 @@ def dashboard(token: Optional[str] = Cookie(None)):
     <div class='panel'>
       <h2>All CDN graph</h2>
       <div class='muted'>Default view: last 24 hours, all CDNs together</div>
+      <div id='homeMeta' class='muted' style='margin-top:6px'></div>
       <svg id='homeChart' class='chart' viewBox='0 0 1200 320' preserveAspectRatio='none'></svg>
       <div id='legend' class='legend'></div>
     </div>
@@ -418,6 +419,18 @@ def dashboard(token: Optional[str] = Cookie(None)):
       }});
     }}
 
+    function wavePath(points, xAt, yAt){{
+      if(!points.length) return '';
+      let d='M ' + xAt(points[0].ts).toFixed(1) + ' ' + yAt(points[0].connection_count).toFixed(1);
+      for(let i=1;i<points.length;i++){{
+        const prev=points[i-1], cur=points[i];
+        const x1=xAt(prev.ts), y1=yAt(prev.connection_count), x2=xAt(cur.ts), y2=yAt(cur.connection_count);
+        const spread=(x2-x1) * 0.45;
+        d += ' C ' + (x1 + spread).toFixed(1) + ' ' + y1.toFixed(1) + ', ' + (x2 - spread).toFixed(1) + ' ' + y2.toFixed(1) + ', ' + x2.toFixed(1) + ' ' + y2.toFixed(1);
+      }}
+      return d;
+    }}
+
     function renderHomeChart(series){{
       const svg=document.getElementById('homeChart');
       svg.replaceChildren();
@@ -441,15 +454,13 @@ def dashboard(token: Optional[str] = Cookie(None)):
       }}
       activeNames.forEach((name, idx) => {{
         const points = series[name] || [];
-        const lookup = new Map(points.map(p => [p.ts, p.connection_count]));
-        let pathD = '';
-        allTimes.forEach(ts => {{
-          if(!lookup.has(ts)) return;
-          const x = xAt(ts).toFixed(1);
-          const y = yAt(lookup.get(ts)).toFixed(1);
-          pathD += (pathD ? ' L ' : 'M ') + x + ' ' + y;
-        }});
+        const pathD = wavePath(points, xAt, yAt);
         if(!pathD) return;
+        const fill=document.createElementNS('http://www.w3.org/2000/svg','path');
+        fill.setAttribute('d', pathD + ' L ' + xAt(points[points.length-1].ts).toFixed(1) + ' ' + (h-padB) + ' L ' + xAt(points[0].ts).toFixed(1) + ' ' + (h-padB) + ' Z');
+        fill.setAttribute('fill', 'rgba(127,232,255,.04)');
+        fill.setAttribute('stroke', 'none');
+        svg.appendChild(fill);
         const path=document.createElementNS('http://www.w3.org/2000/svg','path');
         path.setAttribute('d', pathD);
         path.setAttribute('fill', 'none');
@@ -484,6 +495,8 @@ def dashboard(token: Optional[str] = Cookie(None)):
       const [latestRes, seriesRes] = await Promise.all([fetch('/api/latest'), fetch('/api/series?range=24h')]);
       const latest = await latestRes.json();
       const series = await seriesRes.json();
+      const liveTotal = (latest.items || []).reduce((sum, item) => sum + Number(item.connection_count || 0), 0);
+      document.getElementById('homeMeta').textContent = 'Live total connections: ' + liveTotal + ' · auto-refreshes every 5 seconds';
       renderCards(latest.items || []);
       renderLegend(series.series || {{}});
       renderHomeChart(series.series || {{}});
@@ -944,14 +957,14 @@ def history_page(token: Optional[str] = Cookie(None)):
       if(!points.length){{ target.innerHTML = '<div class="empty">No points yet.</div>'; return; }}
       const table=document.createElement('table');
       const head=document.createElement('tr');
-      ['Timestamp','Connections','Change'].forEach(title => {{ const th=document.createElement('th'); th.textContent=title; head.appendChild(th); }});
+      ['Timestamp','Connections','Samples','Change'].forEach(title => {{ const th=document.createElement('th'); th.textContent=title; head.appendChild(th); }});
       table.appendChild(head);
-      points.slice(-120).reverse().forEach((point, idx) => {{
+      points.forEach((point, idx) => {{
         const tr=document.createElement('tr');
-        const prev = points[points.length - 1 - idx - 1];
+        const prev = points[idx - 1];
         const delta = prev ? Number(point.connection_count || 0) - Number(prev.connection_count || 0) : 0;
         const change = trendFor(delta);
-        [new Date(point.ts*1000).toLocaleString(), String(point.connection_count), (delta > 0 ? '+' : '') + String(delta)].forEach((value, i) => {{ const td=document.createElement('td'); td.textContent=value; if(i === 2) td.style.color = change.color; tr.appendChild(td); }});
+        [new Date(point.ts*1000).toLocaleString(), String(point.connection_count), String(point.samples ?? 1), (delta > 0 ? '+' : '') + String(delta)].forEach((value, i) => {{ const td=document.createElement('td'); td.textContent=value; if(i === 3) td.style.color = change.color; tr.appendChild(td); }});
         table.appendChild(tr);
       }});
       target.replaceChildren(table);
@@ -968,7 +981,7 @@ def history_page(token: Optional[str] = Cookie(None)):
         const d=await historyRes.json();
         const latestPayload = await latestRes.json();
         const latestItem = (latestPayload.items || []).find(item => item.cdn_name === historyState.cdn);
-        document.getElementById('historyMeta').textContent = d.label + ' · ' + historyState.cdn + ' · refreshes every 10 seconds';
+        document.getElementById('historyMeta').textContent = d.label + ' · ' + historyState.cdn + ' · ' + (d.stepLabel || 'bucketed') + ' · refreshes every 10 seconds';
         const points = d.points || [];
         const current = latestItem ? latestItem.connection_count : (points.length ? points[points.length - 1].connection_count : 'n/a');
         const max = points.length ? Math.max(...points.map(p => p.connection_count)) : 0;
