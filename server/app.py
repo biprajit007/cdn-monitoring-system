@@ -342,7 +342,7 @@ def dashboard(token: Optional[str] = Cookie(None)):
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/map'>Bangladesh map</a>
+        <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
@@ -522,6 +522,7 @@ def map_page(token: Optional[str] = Cookie(None)):
     .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}}
     .grid{{display:grid;grid-template-columns:1.5fr .9fr;gap:14px}}
     #map{{height:760px;border:1px solid #1f3b4d;border-radius:12px;overflow:hidden;background:#050b12}}
+    #worldMap{{height:320px;border:1px solid #1f3b4d;border-radius:12px;overflow:hidden;background:#050b12;margin-top:10px}}
     .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}}
     .item{{border-bottom:1px solid #1f3b4d;padding:10px 0}}
     .item:last-child{{border-bottom:none}}
@@ -536,12 +537,12 @@ def map_page(token: Optional[str] = Cookie(None)):
     </head><body><div class='wrap'>
     <div class='nav'>
       <div>
-        <h1 style='margin:0'>Bangladesh CDN Map</h1>
-        <div class='muted' style='margin-top:6px'>Configure map points in <code>/app/data/cdn_map.json</code></div>
+        <h1 style='margin:0'>CDN MAP</h1>
+        <div class='muted' style='margin-top:6px'>Bangladesh view plus a smaller world map for outside-country monitoring</div>
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/map'>Bangladesh map</a>
+        <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
@@ -554,6 +555,12 @@ def map_page(token: Optional[str] = Cookie(None)):
         <div id='markerList'></div>
       </div>
     </div>
+    <div class='panel' style='margin-top:14px'>
+      <h2 style='margin-top:0'>World map</h2>
+      <div class='muted'>Smaller global view for CDN monitoring outside Bangladesh.</div>
+      <div id='worldMap'></div>
+      <div id='worldNote' class='muted' style='margin-top:6px'></div>
+    </div>
     </div>
     <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js' integrity='sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=' crossorigin=''></script>
     <script>
@@ -561,9 +568,24 @@ def map_page(token: Optional[str] = Cookie(None)):
       return '<span class="beeper' + (isLive ? ' live' : '') + '"></span>';
     }}
 
+    function liveIcon(isLive){{
+      return L.divIcon({{ className: '', html: '<div class="beeper' + (isLive ? ' live' : '') + '"></div>', iconSize: [16,16], iconAnchor: [8,8] }});
+    }}
+
+    function renderMarkers(map, markers){{
+      markers.forEach(item => {{
+        const live = item.ts !== null && Number(item.connection_count || 0) > 0;
+        const marker = L.marker([item.lat, item.lon], {{ icon: liveIcon(live) }}).addTo(map);
+        marker.bindPopup(`<b>${{item.cdn_name}}</b><br>${{item.place_name}}<br>Count: ${{item.connection_count ?? 'n/a'}}`);
+      }});
+    }}
+
     async function initMap(){{
       const r = await fetch('/api/map-config');
       const d = await r.json();
+      const resolved = (d.items || []).filter(x => x.resolved);
+      const unresolved = (d.items || []).filter(x => !x.resolved);
+
       const map = L.map('map', {{ zoomControl: true }}).setView([23.6850, 90.3563], 7);
       L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
         maxZoom: 18,
@@ -572,30 +594,37 @@ def map_page(token: Optional[str] = Cookie(None)):
       }}).addTo(map);
       const bounds = [[20.5, 88.0], [26.8, 92.8]];
       map.fitBounds(bounds);
+      renderMarkers(map, resolved);
+
       const list = document.getElementById('markerList');
       list.replaceChildren();
-      const markers = (d.items || []).filter(x => x.resolved);
-      if(!markers.length){{
+      if(!(d.items || []).length){{
         list.innerHTML = '<div class="muted">No map config yet. Add entries in /app/data/cdn_map.json.</div>';
-        return;
       }}
-      markers.forEach((item, idx) => {{
+      resolved.forEach((item, idx) => {{
         const live = item.ts !== null && Number(item.connection_count || 0) > 0;
-        const icon = L.divIcon({{ className: '', html: '<div class="beeper' + (live ? ' live' : '') + '"></div>', iconSize: [16,16], iconAnchor: [8,8] }});
-        const marker = L.marker([item.lat, item.lon], {{ icon }}).addTo(map);
-        marker.bindPopup(`<b>${{item.cdn_name}}</b><br>${{item.place_name}}<br>Count: ${{item.connection_count ?? 'n/a'}}`);
         const row = document.createElement('div');
         row.className = 'item';
         row.innerHTML = '<div class="row">' + beeperHtml(live) + '<b>' + item.cdn_name + '</b></div><div class="muted">' + item.place_name + '</div><div class="muted">count: ' + (item.connection_count ?? 'n/a') + '</div>';
         list.appendChild(row);
       }});
-      const unresolved = (d.items || []).filter(x => !x.resolved);
       unresolved.forEach(item => {{
         const row = document.createElement('div');
         row.className = 'item';
         row.innerHTML = '<div class="row">' + beeperHtml(false) + '<b>' + item.cdn_name + '</b></div><span class="muted">Unresolved place: ' + (item.place_name || 'missing') + '</span>';
         list.appendChild(row);
       }});
+
+      const worldMap = L.map('worldMap', {{ zoomControl: true, worldCopyJump: true }}).setView([18, 0], 2);
+      L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
+        maxZoom: 18,
+        subdomains: 'abcd',
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      }}).addTo(worldMap);
+      worldMap.fitWorld();
+      renderMarkers(worldMap, resolved);
+      const outside = resolved.filter(item => item.lat < 20.5 || item.lat > 26.8 || item.lon < 88.0 || item.lon > 92.8);
+      document.getElementById('worldNote').textContent = outside.length ? ('Outside Bangladesh, ' + outside.length + ' CDN(s) are already visible in the global map.') : 'No outside-Bangladesh CDN coordinates yet, world map stays ready.';
     }}
     initMap();
     </script></body></html>"""
@@ -648,7 +677,7 @@ def management_page(token: Optional[str] = Cookie(None)):
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/map'>Bangladesh map</a>
+        <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout (__USERNAME__)</a>
@@ -821,7 +850,7 @@ def history_page(token: Optional[str] = Cookie(None)):
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/map'>Bangladesh map</a>
+        <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
         <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
