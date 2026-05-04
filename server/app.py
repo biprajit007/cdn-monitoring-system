@@ -581,30 +581,37 @@ def management_page(token: Optional[str] = Cookie(None)):
     return """<!doctype html><html><head><title>CDN Monitor Management</title>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
     <style>
-    body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
-    a{{color:#7fe8ff;text-decoration:none}}
-    a:hover{{text-decoration:underline}}
-    .wrap{{max-width:1400px;margin:0 auto}}
-    .nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}}
-    .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
-    .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}}
-    .grid{{display:grid;grid-template-columns:1fr 1.1fr;gap:14px}}
-    .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}}
-    .panel h2{{margin:0 0 12px 0;font-size:18px}}
-    .muted{{opacity:.75}}
-    label{{display:block;margin:10px 0 6px}}
-    input{{width:100%;box-sizing:border-box;background:#081018;color:#d8f7ff;border:1px solid #1f3b4d;padding:10px;border-radius:6px}}
-    button{{background:#0f2a1e;color:#7bffad;border:1px solid #2c6a44;padding:10px 14px;border-radius:8px;cursor:pointer}}
-    button:hover{{background:#133523}}
-    table{{border-collapse:collapse;width:100%}}
-    td,th{{border:1px solid #1f3b4d;padding:8px;text-align:left;vertical-align:top}}
-    .dot{{display:inline-block;width:10px;height:10px;border-radius:999px;background:#27d36b;box-shadow:0 0 0 0 rgba(39,211,107,.7);animation:pulse 1.4s infinite}}
-    .dot.off{{background:#4d5963;animation:none;box-shadow:none}}
-    @keyframes pulse{{0%{{box-shadow:0 0 0 0 rgba(39,211,107,.55)}}70%{{box-shadow:0 0 0 12px rgba(39,211,107,0)}}100%{{box-shadow:0 0 0 0 rgba(39,211,107,0)}}}}
-    .row{{display:flex;align-items:center;gap:8px}}
-    .actions{{display:flex;gap:8px;flex-wrap:wrap}}
-    .small{{font-size:12px;opacity:.8}}
-    pre{{white-space:pre-wrap;background:#081018;border:1px solid #1f3b4d;border-radius:8px;padding:12px;overflow:auto}}
+    body{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}
+    a{color:#7fe8ff;text-decoration:none}
+    a:hover{text-decoration:underline}
+    .wrap{max-width:1400px;margin:0 auto}
+    .nav{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+    .navlinks{display:flex;gap:14px;flex-wrap:wrap}
+    .badge{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}
+    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}
+    .card{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:14px}
+    .card .label{font-size:12px;opacity:.75;margin-bottom:6px}
+    .card .value{font-size:28px;font-weight:700}
+    .grid{display:grid;grid-template-columns:1fr 1.1fr;gap:14px}
+    .panel{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}
+    .panel h2{margin:0 0 12px 0;font-size:18px}
+    .muted{opacity:.75}
+    .small{font-size:12px;opacity:.8}
+    .section{margin-top:14px}
+    label{display:block;margin:10px 0 6px}
+    input{width:100%;box-sizing:border-box;background:#081018;color:#d8f7ff;border:1px solid #1f3b4d;padding:10px;border-radius:6px}
+    button{background:#0f2a1e;color:#7bffad;border:1px solid #2c6a44;padding:10px 14px;border-radius:8px;cursor:pointer}
+    button:hover{background:#133523}
+    .secondary{background:#0d2438;color:#7fe8ff;border-color:#1f3b4d}
+    table{border-collapse:collapse;width:100%}
+    td,th{border:1px solid #1f3b4d;padding:8px;text-align:left;vertical-align:top}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:999px;background:#27d36b;box-shadow:0 0 0 0 rgba(39,211,107,.7);animation:pulse 1.4s infinite}
+    .dot.off{background:#4d5963;animation:none;box-shadow:none}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(39,211,107,.55)}70%{box-shadow:0 0 0 12px rgba(39,211,107,0)}100%{box-shadow:0 0 0 0 rgba(39,211,107,0)}}
+    .row{display:flex;align-items:center;gap:8px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    pre{white-space:pre-wrap;background:#081018;border:1px solid #1f3b4d;border-radius:8px;padding:12px;overflow:auto}
+    .hint{background:#081018;border:1px dashed #1f3b4d;border-radius:10px;padding:12px;margin-top:12px}
     </style>
     </head><body><div class='wrap'>
     <div class='nav'>
@@ -621,6 +628,8 @@ def management_page(token: Optional[str] = Cookie(None)):
       </div>
     </div>
 
+    <div class='cards' id='summaryCards'></div>
+
     <div class='grid'>
       <div class='panel'>
         <h2>Add / update CDN</h2>
@@ -630,18 +639,21 @@ def management_page(token: Optional[str] = Cookie(None)):
           <label>Place name</label><input id='placeName' placeholder='Dhaka'>
           <label>Latitude (optional)</label><input id='lat' type='number' step='any' placeholder='23.8103'>
           <label>Longitude (optional)</label><input id='lon' type='number' step='any' placeholder='90.4125'>
-          <div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>
+          <div class='section' style='display:flex;gap:10px;flex-wrap:wrap'>
             <button type='submit'>Save CDN</button>
-            <button type='button' id='seedBtn' style='background:#0d2438;color:#7fe8ff;border-color:#1f3b4d'>Seed example CDNs</button>
+            <button type='button' id='seedBtn' class='secondary'>Seed example CDNs</button>
           </div>
         </form>
-        <h3 style='margin:18px 0 8px'>Agent setup hint</h3>
-        <div class='small'>Run one agent per CDN name. Example:</div>
-        <pre>CDN_NAME=cdn2
+
+        <div class='hint'>
+          <div class='small'>Agent setup hint</div>
+          <pre>CDN_NAME=cdn2
 TARGET_PORT=443
 SERVER_ENDPOINT=http://server:18443/api/ingest
-INGEST_TOKEN=... </pre>
+INGEST_TOKEN=...</pre>
+        </div>
       </div>
+
       <div class='panel'>
         <h2>Configured CDNs</h2>
         <div id='configList'></div>
@@ -649,14 +661,29 @@ INGEST_TOKEN=... </pre>
     </div>
     </div>
     <script>
+    function makeCard(parent, label, value, sub=''){
+      const card=document.createElement('div'); card.className='card';
+      card.innerHTML = '<div class="label">'+label+'</div><div class="value">'+value+'</div>' + (sub ? '<div class="muted" style="margin-top:6px">'+sub+'</div>' : '');
+      parent.appendChild(card);
+    }
+
     async function refreshConfig(){
       const [cfgRes, latestRes] = await Promise.all([fetch('/api/map-config'), fetch('/api/latest')]);
       const cfg = await cfgRes.json();
       const latest = await latestRes.json();
       const latestMap = new Map((latest.items || []).map(x => [x.cdn_name, x]));
+      const items = cfg.items || [];
+      const liveItems = items.filter(item => latestMap.get(item.cdn_name) && latestMap.get(item.cdn_name).ts !== null);
       const list = document.getElementById('configList');
+      const summary = document.getElementById('summaryCards');
+      summary.replaceChildren();
+      makeCard(summary, 'Configured', String(items.length), 'CDNs in management');
+      makeCard(summary, 'Live', String(liveItems.length), 'sending metrics now');
+      makeCard(summary, 'Waiting', String(Math.max(0, items.length - liveItems.length)), 'need an agent');
+      makeCard(summary, 'Map pins', String(items.filter(x => x.resolved).length), 'resolved locations');
+
       list.replaceChildren();
-      if(!(cfg.items || []).length){
+      if(!items.length){
         list.innerHTML = '<div class="muted">No CDN config yet.</div>';
         return;
       }
@@ -664,14 +691,14 @@ INGEST_TOKEN=... </pre>
       const head=document.createElement('tr');
       ['Status','CDN','Place','Lat/Lon','Live count','Actions'].forEach(title => { const th=document.createElement('th'); th.textContent=title; head.appendChild(th); });
       table.appendChild(head);
-      (cfg.items || []).forEach(item => {
+      items.forEach(item => {
         const row=document.createElement('tr');
         const live = latestMap.get(item.cdn_name);
-        const statusDot = document.createElement('span');
-        statusDot.className = 'dot' + ((live && live.ts !== null && Number(live.connection_count) > 0) ? '' : ' off');
         const statusTd = document.createElement('td');
         const statusWrap = document.createElement('div');
         statusWrap.className = 'row';
+        const statusDot = document.createElement('span');
+        statusDot.className = 'dot' + ((live && live.ts !== null && Number(live.connection_count) > 0) ? '' : ' off');
         const statusLabel = document.createElement('span');
         statusLabel.textContent = (live && live.ts !== null) ? 'live' : 'waiting';
         statusWrap.append(statusDot, statusLabel);
@@ -682,6 +709,7 @@ INGEST_TOKEN=... </pre>
         const placeTd = document.createElement('td'); placeTd.textContent = item.place_name || ''; row.appendChild(placeTd);
         const latLonTd = document.createElement('td'); latLonTd.textContent = (item.lat != null && item.lon != null) ? item.lat + ', ' + item.lon : 'unresolved'; row.appendChild(latLonTd);
         const liveTd = document.createElement('td'); liveTd.textContent = live ? String(live.connection_count) : '0'; row.appendChild(liveTd);
+
         const actionsTd = document.createElement('td');
         actionsTd.className = 'actions';
         const del = document.createElement('button');
@@ -736,7 +764,7 @@ def history_page(token: Optional[str] = Cookie(None)):
     username = username_from_token(token)
     if not username:
         return RedirectResponse(url='/login', status_code=303)
-    return f"""<!doctype html><html><head><title>CDN Monitor History</title>
+    return """<!doctype html><html><head><title>CDN Monitor History</title>
     <style>
     body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
     a{{color:#7fe8ff;text-decoration:none}}
@@ -769,7 +797,7 @@ def history_page(token: Optional[str] = Cookie(None)):
         <a class='badge' href='/map'>Bangladesh map</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
-        <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
+        <a class='badge' href='/logout'>Logout (__USERNAME__)</a>
       </div>
     </div>
 
@@ -897,7 +925,7 @@ def history_page(token: Optional[str] = Cookie(None)):
     }}
 
     initHistory();
-    </script></body></html>"""
+    </script></body></html>""".replace('__USERNAME__', html.escape(username))
 
 @app.post('/api/ingest')
 def ingest(metric: MetricIn, x_agent_token: Optional[str] = Header(None)):
