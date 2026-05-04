@@ -28,7 +28,6 @@ A small two-service monitoring stack: an agent counts TCP connections for a targ
 git clone https://github.com/biprajit007/cdn-monitoring-system.git
 cd cdn-monitoring-system
 cp .env.example .env
-docker compose run --rm server python setup_user.py admin change-me
 docker compose up --build
 ```
 
@@ -39,6 +38,11 @@ https://cdn-monitor.rockstreamer.com:18443/login
 ```
 
 The root URL redirects there until you log in.
+
+Default first login, if bootstrap is enabled:
+
+- Username: `admin`
+- Password: `cdn-monitor-2026!`
 
 ## Configuration
 

@@ -39,6 +39,9 @@ JWT_SECRET = os.getenv('JWT_SECRET', 'change-me-in-production')
 JWT_ALGORITHM = 'HS256'
 SESSION_HOURS = int(os.getenv('SESSION_HOURS', '24'))
 RETENTION_DAYS = int(os.getenv('RETENTION_DAYS', '30'))
+BOOTSTRAP_ADMIN_USERNAME = os.getenv('BOOTSTRAP_ADMIN_USERNAME', 'admin')
+BOOTSTRAP_ADMIN_PASSWORD = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', 'cdn-monitor-2026!')
+AUTO_BOOTSTRAP_ADMIN = os.getenv('AUTO_BOOTSTRAP_ADMIN', 'true').lower() in ('1', 'true', 'yes', 'on')
 
 pwd_context = CryptContext(schemes=['argon2'], deprecated='auto')
 app = FastAPI(title='CDN Monitoring System')
@@ -87,16 +90,38 @@ def cleanup_old_metrics():
     conn.commit()
     logger.info(f'Cleaned up metrics older than {RETENTION_DAYS} days')
 
+def bootstrap_admin_if_needed():
+    if not AUTO_BOOTSTRAP_ADMIN:
+        return
+    row = conn.execute('SELECT COUNT(*) FROM users').fetchone()
+    if row and row[0] > 0:
+        return
+    hashed = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
+    conn.execute(
+        'INSERT OR REPLACE INTO users(username, hashed_password, created_at) VALUES (?, ?, ?)',
+        (BOOTSTRAP_ADMIN_USERNAME, hashed, int(time.time()))
+    )
+    conn.commit()
+    logger.warning('Bootstrapped default admin user %s', BOOTSTRAP_ADMIN_USERNAME)
+
+
+@app.on_event('startup')
+def startup():
+    bootstrap_admin_if_needed()
+
 @app.get('/login', response_class=HTMLResponse)
 def login_page():
+    bootstrap_hint = ''
+    if AUTO_BOOTSTRAP_ADMIN:
+        bootstrap_hint = f"<p style='font-size:12px;opacity:.8'>First login: {html.escape(BOOTSTRAP_ADMIN_USERNAME)} / {html.escape(BOOTSTRAP_ADMIN_PASSWORD)}</p>"
     return """<!doctype html><html><head><title>CDN Monitor Login</title>
-    <style>body{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
-    .login-box{border:1px solid #1f3b4d;padding:30px;border-radius:5px;width:300px}input{width:100%;padding:10px;margin:10px 0;background:#0a1520;border:1px solid #1f3b4d;color:#d8f7ff;box-sizing:border-box}
-    button{width:100%;padding:10px;margin-top:10px;background:#1f3b4d;color:#7fe8ff;border:1px solid #7fe8ff;cursor:pointer}button:hover{background:#2a4a5d}
-    .error{color:#ff6b6b;margin-bottom:10px}</style>
+    <style>body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}}
+    .login-box{{border:1px solid #1f3b4d;padding:30px;border-radius:5px;width:300px}}input{{width:100%;padding:10px;margin:10px 0;background:#0a1520;border:1px solid #1f3b4d;color:#d8f7ff;box-sizing:border-box}}
+    button{{width:100%;padding:10px;margin-top:10px;background:#1f3b4d;color:#7fe8ff;border:1px solid #7fe8ff;cursor:pointer}}button:hover{{background:#2a4a5d}}
+    .error{{color:#ff6b6b;margin-bottom:10px}}</style>
     </head><body><div class='login-box'><h1>CDN Monitor</h1>
     <form method='post' action='/api/login'><input type='text' name='username' placeholder='Username' required>
-    <input type='password' name='password' placeholder='Password' required><button type='submit'>Login</button></form></div></body></html>"""
+    <input type='password' name='password' placeholder='Password' required><button type='submit'>Login</button></form>{bootstrap_hint}</div></body></html>""".format(bootstrap_hint=bootstrap_hint)
 
 @app.post('/api/login')
 def api_login(username: str = Form(...), password: str = Form(...)):
