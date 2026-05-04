@@ -511,125 +511,114 @@ def map_page(token: Optional[str] = Cookie(None)):
     username = username_from_token(token)
     if not username:
         return RedirectResponse(url='/login', status_code=303)
-    return f"""<!doctype html><html><head><title>CDN Monitor Map</title>
+    return """<!doctype html><html><head><title>CDN MAP</title>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
     <link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' integrity='sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=' crossorigin=''/>
     <style>
-    body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
-    .wrap{{max-width:1400px;margin:0 auto}}
-    .nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}}
-    .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
-    .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}}
-    .grid{{display:grid;grid-template-columns:1.5fr .9fr;gap:14px}}
-    #map{{height:760px;border:1px solid #1f3b4d;border-radius:12px;overflow:hidden;background:#050b12}}
-    #worldMap{{height:320px;border:1px solid #1f3b4d;border-radius:12px;overflow:hidden;background:#050b12;margin-top:10px}}
-    .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}}
-    .item{{border-bottom:1px solid #1f3b4d;padding:10px 0}}
-    .item:last-child{{border-bottom:none}}
-    .muted{{opacity:.75}}
-    .row{{display:flex;align-items:center;gap:8px}}
-    .beeper{{width:16px;height:16px;border-radius:999px;background:#60707c;box-shadow:none;position:relative;flex:0 0 16px}}
-    .beeper.live{{background:#27d36b;box-shadow:0 0 0 0 rgba(39,211,107,.65);animation:pulse 1.4s infinite}}
-    .beeper::after{{content:'';position:absolute;inset:4px;border-radius:999px;background:rgba(255,255,255,.8);opacity:.25}}
-    .beeper.live::after{{background:#b9ffd2;opacity:.95}}
-    @keyframes pulse{{0%{{box-shadow:0 0 0 0 rgba(39,211,107,.55)}}70%{{box-shadow:0 0 0 14px rgba(39,211,107,0)}}100%{{box-shadow:0 0 0 0 rgba(39,211,107,0)}}}}
+    body{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}
+    .wrap{max-width:1600px;margin:0 auto}
+    .nav{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+    .navlinks{display:flex;gap:14px;flex-wrap:wrap}
+    .badge{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520;color:#7fe8ff;text-decoration:none}
+    .layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}
+    #map{height:calc(100vh - 170px);min-height:760px;border:1px solid #1f3b4d;border-radius:14px;overflow:hidden;background:#050b12}
+    .panel{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px}
+    .item{border-bottom:1px solid #1f3b4d;padding:10px 0}
+    .item:last-child{border-bottom:none}
+    .muted{opacity:.75}
+    .row{display:flex;align-items:center;gap:8px}
+    .beeper{width:16px;height:16px;border-radius:999px;background:#60707c;box-shadow:none;position:relative;flex:0 0 16px}
+    .beeper.live{background:#27d36b;box-shadow:0 0 0 0 rgba(39,211,107,.65);animation:pulse 1.4s infinite}
+    .beeper::after{content:'';position:absolute;inset:4px;border-radius:999px;background:rgba(255,255,255,.8);opacity:.25}
+    .beeper.live::after{background:#b9ffd2;opacity:.95}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(39,211,107,.55)}70%{box-shadow:0 0 0 14px rgba(39,211,107,0)}100%{box-shadow:0 0 0 0 rgba(39,211,107,0)}}
     </style>
     </head><body><div class='wrap'>
     <div class='nav'>
       <div>
         <h1 style='margin:0'>CDN MAP</h1>
-        <div class='muted' style='margin-top:6px'>Bangladesh view plus a smaller world map for outside-country monitoring</div>
+        <div class='muted' style='margin-top:6px'>Single world map for CDN monitoring, larger and easier to read.</div>
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
-        <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
+        <a class='badge' href='/logout'>Logout (__USERNAME__)</a>
       </div>
     </div>
-    <div class='grid'>
+
+    <div class='layout'>
       <div id='map'></div>
       <div class='panel'>
         <h2 style='margin-top:0'>Configured CDNs</h2>
+        <div class='muted' style='margin-bottom:10px'>Green means live, gray means waiting.</div>
         <div id='markerList'></div>
       </div>
-    </div>
-    <div class='panel' style='margin-top:14px'>
-      <h2 style='margin-top:0'>World map</h2>
-      <div class='muted'>Smaller global view for CDN monitoring outside Bangladesh.</div>
-      <div id='worldMap'></div>
-      <div id='worldNote' class='muted' style='margin-top:6px'></div>
     </div>
     </div>
     <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js' integrity='sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=' crossorigin=''></script>
     <script>
-    function beeperHtml(isLive){{
+    function beeperHtml(isLive){
       return '<span class="beeper' + (isLive ? ' live' : '') + '"></span>';
-    }}
+    }
 
-    function liveIcon(isLive){{
-      return L.divIcon({{ className: '', html: '<div class="beeper' + (isLive ? ' live' : '') + '"></div>', iconSize: [16,16], iconAnchor: [8,8] }});
-    }}
+    function liveIcon(isLive){
+      return L.divIcon({ className: '', html: '<div class="beeper' + (isLive ? ' live' : '') + '"></div>', iconSize: [16,16], iconAnchor: [8,8] });
+    }
 
-    function renderMarkers(map, markers){{
-      markers.forEach(item => {{
+    function renderMarkers(map, markers){
+      markers.forEach(item => {
         const live = item.ts !== null && Number(item.connection_count || 0) > 0;
-        const marker = L.marker([item.lat, item.lon], {{ icon: liveIcon(live) }}).addTo(map);
-        marker.bindPopup(`<b>${{item.cdn_name}}</b><br>${{item.place_name}}<br>Count: ${{item.connection_count ?? 'n/a'}}`);
-      }});
-    }}
+        const marker = L.marker([item.lat, item.lon], { icon: liveIcon(live) }).addTo(map);
+        marker.bindPopup(`<b>${item.cdn_name}</b><br>${item.place_name}<br>Count: ${item.connection_count ?? 'n/a'}`);
+      });
+    }
 
-    async function initMap(){{
+    async function initMap(){
       const r = await fetch('/api/map-config');
       const d = await r.json();
       const resolved = (d.items || []).filter(x => x.resolved);
       const unresolved = (d.items || []).filter(x => !x.resolved);
 
-      const map = L.map('map', {{ zoomControl: true }}).setView([23.6850, 90.3563], 7);
-      L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
+      const map = L.map('map', { zoomControl: true, worldCopyJump: true }).setView([18, 0], 2);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
         maxZoom: 18,
         subdomains: 'abcd',
         attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
-      }}).addTo(map);
-      const bounds = [[20.5, 88.0], [26.8, 92.8]];
-      map.fitBounds(bounds);
+      }).addTo(map);
+      if(resolved.length){
+        const bounds = L.latLngBounds(resolved.map(item => [item.lat, item.lon]));
+        map.fitBounds(bounds.pad(0.35));
+      } else {
+        map.fitWorld();
+      }
       renderMarkers(map, resolved);
 
       const list = document.getElementById('markerList');
       list.replaceChildren();
-      if(!(d.items || []).length){{
+      if(!(d.items || []).length){
         list.innerHTML = '<div class="muted">No map config yet. Add entries in /app/data/cdn_map.json.</div>';
-      }}
-      resolved.forEach((item, idx) => {{
+      }
+      resolved.forEach(item => {
         const live = item.ts !== null && Number(item.connection_count || 0) > 0;
         const row = document.createElement('div');
         row.className = 'item';
         row.innerHTML = '<div class="row">' + beeperHtml(live) + '<b>' + item.cdn_name + '</b></div><div class="muted">' + item.place_name + '</div><div class="muted">count: ' + (item.connection_count ?? 'n/a') + '</div>';
         list.appendChild(row);
-      }});
-      unresolved.forEach(item => {{
+      });
+      unresolved.forEach(item => {
         const row = document.createElement('div');
         row.className = 'item';
         row.innerHTML = '<div class="row">' + beeperHtml(false) + '<b>' + item.cdn_name + '</b></div><span class="muted">Unresolved place: ' + (item.place_name || 'missing') + '</span>';
         list.appendChild(row);
-      }});
-
-      const worldMap = L.map('worldMap', {{ zoomControl: true, worldCopyJump: true }}).setView([18, 0], 2);
-      L.tileLayer('https://{{s}}.basemaps.cartocdn.com/dark_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-        maxZoom: 18,
-        subdomains: 'abcd',
-        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
-      }}).addTo(worldMap);
-      worldMap.fitWorld();
-      renderMarkers(worldMap, resolved);
-      const outside = resolved.filter(item => item.lat < 20.5 || item.lat > 26.8 || item.lon < 88.0 || item.lon > 92.8);
-      document.getElementById('worldNote').textContent = outside.length ? ('Outside Bangladesh, ' + outside.length + ' CDN(s) are already visible in the global map.') : 'No outside-Bangladesh CDN coordinates yet, world map stays ready.';
-    }}
+      });
+    }
     initMap();
-    </script></body></html>"""
+    </script></body></html>""".replace('__USERNAME__', html.escape(username))
 
 @app.get('/management', response_class=HTMLResponse)
+
 def management_page(token: Optional[str] = Cookie(None)):
     username = username_from_token(token)
     if not username:
