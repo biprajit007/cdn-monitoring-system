@@ -2,7 +2,7 @@ from fastapi import FastAPI, Header, HTTPException, Cookie, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
-import os, sqlite3, time, html, logging, json
+import os, sqlite3, time, html, logging, json, hashlib, math
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -99,6 +99,16 @@ WORLD_PLACES = {
 }
 
 ALL_PLACES = {**BANGLADESH_PLACES, **WORLD_PLACES}
+
+def area_offset(place_name: str, area_name: str, base_lat: float):
+    key = f'{place_name}|{area_name}'.strip().lower().encode('utf-8')
+    digest = hashlib.sha1(key).digest()
+    angle = (int.from_bytes(digest[:2], 'big') / 65535.0) * (2 * math.pi)
+    radius = 0.002 + (int.from_bytes(digest[2:4], 'big') / 65535.0) * 0.010
+    lat_delta = math.cos(angle) * radius
+    lon_scale = max(math.cos(math.radians(base_lat)), 0.25)
+    lon_delta = math.sin(angle) * (radius / lon_scale)
+    return lat_delta, lon_delta
 
 def get_configured_cdns() -> set:
     raw = load_map_config_raw()
@@ -253,11 +263,17 @@ def load_map_locations():
         lookup = bd_lookup or world_lookup
         is_bd = bd_lookup is not None
         if lookup:
-            lat = lookup['lat'] if lat is None else lat
-            lon = lookup['lon'] if lon is None else lon
             place_name = lookup['label']
             landmark = lookup.get('landmark')
             emoji = lookup.get('emoji')
+            base_lat = lookup['lat'] if lat is None else lat
+            base_lon = lookup['lon'] if lon is None else lon
+            if area_name and abs(base_lat - lookup['lat']) < 1e-9 and abs(base_lon - lookup['lon']) < 1e-9:
+                dlat, dlon = area_offset(place_name or lookup['label'], area_name, base_lat)
+                base_lat += dlat
+                base_lon += dlon
+            lat = base_lat
+            lon = base_lon
         elif lat is not None:
             # manual lat/lon — check if inside BD bounds
             is_bd = (20.5 <= lat <= 26.7) and (87.9 <= (lon or 0) <= 92.8)
@@ -619,7 +635,9 @@ def map_page(token: Optional[str] = Cookie(None)):
     .pin-card{display:flex;align-items:center;gap:4px;background:rgba(5,11,18,.92);border:1px solid #27d36b;border-radius:5px;padding:3px 7px;white-space:nowrap}
     .pin-dot{width:7px;height:7px;border-radius:50%;background:#27d36b;animation:glow 1.4s infinite;flex:0 0 7px}
     .pin-dot.off{background:#60707c;animation:none}
+    .pin-text{display:flex;flex-direction:column;line-height:1.05}
     .pin-name{color:#d8f7ff;font-size:10px;font-weight:700}
+    .pin-area{color:#7fe8ff;font-size:9px;opacity:.9}
     .pin-count{color:#27d36b;font-size:10px;font-weight:700;margin-left:3px}
     .pin-count.off{color:#60707c}
     .leaflet-popup-content-wrapper{background:#0a1520;color:#d8f7ff;border:1px solid #1f3b4d;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.7)}
@@ -666,7 +684,9 @@ def map_page(token: Optional[str] = Cookie(None)):
       const html = '<div class="cdn-pin">'
         + '<div class="pin-card">'
         + '<span class="pin-dot' + (live?'':' off') + '"></span>'
-        + '<span class="pin-name">' + item.cdn_name + '</span>'
+        + '<span class="pin-text"><span class="pin-name">' + item.cdn_name + '</span>'
+        + (item.area_name ? '<span class="pin-area">' + item.area_name + '</span>' : '')
+        + '</span>'
         + '<span class="pin-count' + (live?'':' off') + '">' + cnt + '</span>'
         + '</div></div>';
       return L.divIcon({className:'', html, iconSize:[1,1], iconAnchor:[0,0]});
