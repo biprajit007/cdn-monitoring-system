@@ -517,84 +517,63 @@ def dashboard(token: Optional[str] = Cookie(None)):
         const d = new Date(ts*1000);
         return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
       }});
-      
       const datasets = names.map((name, idx) => {{
         const color = palette[idx % palette.length];
         const tsMap = Object.fromEntries((series[name]||[]).map(p=>[p.ts, p.connection_count]));
         const data = allTs.map(ts => tsMap[ts] ?? null);
-        const rgbMatch = color.match(/^#(..)(..)(..)$/) || [];
-        const r = parseInt(rgbMatch[1] || '00', 16);
-        const g = parseInt(rgbMatch[2] || '00', 16);
-        const b = parseInt(rgbMatch[3] || '00', 16);
-        const gradColor = ;
-        
         return {{
           label: name,
           data,
           borderColor: color,
-          backgroundColor: gradColor,
-          borderWidth: 3,
-          pointRadius: 2,
+          backgroundColor: color.replace(')', ', 0.08)').replace('rgb','rgba').replace('#', 'rgba(').replace(/rgba\(([0-9a-f]{{2}})([0-9a-f]{{2}})([0-9a-f]{{2}})/i, (_,r,g,b)=>`rgba(${{parseInt(r,16)}},${{parseInt(g,16)}},${{parseInt(b,16)}}`),
+          borderWidth: 2.5,
+          pointRadius: 3,
           pointHoverRadius: 7,
-          pointBackgroundColor: color,
-          pointBorderColor: '#fff',
-          pointBorderWidth: 2,
-          tension: 0.45,
+          tension: 0.4,
           fill: true,
           spanGaps: true,
-          segment: {{
-            borderDash: ctx => ctx.p0DataIndex === ctx.p1DataIndex - 1 ? [] : [5, 5]
-          }}
         }};
       }});
-      
       if(homeChart){{ homeChart.destroy(); }}
-      
       homeChart = new Chart(canvas, {{
         type: 'line',
         data: {{ labels, datasets }},
         options: {{
           responsive: true,
+          animation: { duration: 600, easing: 'easeInOutQuad'},
           maintainAspectRatio: false,
-          animation: {{
-            duration: 750,
-            easing: 'easeInOutQuart',
-            loops: 1
-          }},
           interaction: {{ mode: 'index', intersect: false }},
           plugins: {{
-            filler: {{ propagate: true }},
             legend: {{ display: false }},
             tooltip: {{
               backgroundColor: 'rgba(10,21,32,0.98)',
-              borderColor: '#27d36b',
-              borderWidth: 2,
-              titleColor: '#27d36b',
+              borderColor: '#1f3b4d',
+              borderWidth: 1,
+              titleColor: '#7fe8ff',
               bodyColor: '#d8f7ff',
-              padding: 12,
-              displayColors: true,
+              padding: 10,
               callbacks: {{
-                label: ctx => ' ' + ctx.dataset.label + ': ' + Number(ctx.parsed.y).toLocaleString() + ' connections'
+                label: ctx => ' ' + ctx.dataset.label + ': ' + Number(ctx.parsed.y).toLocaleString()
               }}
             }}
           }},
           scales: {{
             x: {{
-              grid: {{ color: '#1f3b4d', drawBorder: false }},
-              ticks: {{ color: '#7fe8ff', maxTicksLimit: 12, font: {{ size: 11, weight: '500' }} }},
-              border: {{ color: '#1f3b4d', display: true }}
+              grid: {{ color: '#1f3b4d' }},
+              ticks: {{ color: '#7fe8ff', maxTicksLimit: 12, font: {{ size: 11 }} }},
+              border: {{ color: '#1f3b4d' }}
             }},
             y: {{
-              grid: {{ color: '#1f3b4d', drawBorder: false }},
-              ticks: {{ color: '#7fe8ff', font: {{ size: 11, weight: '500' }}, callback: v => Number(v).toLocaleString() }},
-              border: {{ color: '#1f3b4d', display: true }},
-              beginAtZero: true,
-              stacked: false
+              grid: {{ color: '#1f3b4d' }},
+              ticks: {{ color: '#7fe8ff', font: {{ size: 11 }}, callback: v => Number(v).toLocaleString() }},
+              border: {{ color: '#1f3b4d' }},
+              beginAtZero: true
             }}
           }}
         }}
       }});
     }}
+
     async function loadGraphs(){{
       const [latestRes, seriesRes] = await Promise.all([fetch('/api/latest'), fetch('/api/series?range=24h')]);
       const latest = await latestRes.json();
@@ -618,8 +597,7 @@ def dashboard(token: Optional[str] = Cookie(None)):
       renderLatestTable(items);
     }}
 
-    loadGraphs(); 
-    const autoRefresh = setInterval(loadGraphs, 5000);
+    loadGraphs(); setInterval(loadGraphs, 5000);
     </script></body></html>"""
 
 @app.get('/map', response_class=HTMLResponse)
