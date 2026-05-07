@@ -1,18 +1,22 @@
 {
-  "api.example.com": {
+  "bioscopelive.com": {
     "cdn_name": "cdn1",
-    "description": "API endpoints for main service"
+    "description": "Bioscope Live main service"
   },
-  "cdn.example.com": {
+  "bioscopeplus.com": {
     "cdn_name": "cdn1",
-    "description": "CDN for media content"
+    "description": "Bioscope Plus main domain"
   },
-  "static.example.com": {
+  "mygp.bioscopeplus.com": {
     "cdn_name": "cdn2",
-    "description": "Static assets distribution"
+    "description": "MyGP subdomain"
   },
-  "video.example.com": {
-    "cdn_name": "cdn2",
-    "description": "Video streaming endpoint"
+  "tv.bioscopeplus.com": {
+    "cdn_name": "cdn1",
+    "description": "TV streaming subdomain"
+  },
+  "api.rockstreamer.com": {
+    "cdn_name": "cdn1",
+    "description": "API endpoints"
   }
 }

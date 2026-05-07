@@ -32,6 +32,32 @@ CREATE TABLE IF NOT EXISTS users (
  created_at INTEGER NOT NULL
 )
 """)
+conn.execute("""
+CREATE TABLE IF NOT EXISTS domain_config (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ domain TEXT UNIQUE NOT NULL,
+ cdn_name TEXT NOT NULL,
+ description TEXT,
+ enabled BOOLEAN DEFAULT 1,
+ created_at INTEGER NOT NULL
+)
+""")
+conn.execute("""
+CREATE TABLE IF NOT EXISTS domain_hits (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ ts INTEGER NOT NULL,
+ cdn_name TEXT NOT NULL,
+ domain TEXT NOT NULL,
+ referer TEXT,
+ user_agent TEXT,
+ status_code INTEGER,
+ bytes_sent INTEGER,
+ request_path TEXT,
+ hit_count INTEGER DEFAULT 1
+)
+""")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_hits_ts_domain ON domain_hits(cdn_name, ts, domain)")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_hits_domain ON domain_hits(domain)")
 conn.commit()
 
 TOKEN = os.getenv('INGEST_TOKEN', 'change-me')
@@ -339,6 +365,37 @@ def get_domain_stats():
                     'description': domain_info.get('description', '')
                 })
     return sorted(domains, key=lambda x: x['connection_count'], reverse=True)
+
+def query_domain_hits(domain: str, since_ts: int = None, until_ts: int = None):
+    if not since_ts:
+        since_ts = int(time.time()) - 86400
+    if not until_ts:
+        until_ts = int(time.time())
+    rows = conn.execute(
+        'SELECT ts, cdn_name, domain, status_code, hit_count, request_path FROM domain_hits '
+        'WHERE domain=? AND ts BETWEEN ? AND ? ORDER BY ts DESC',
+        (domain, since_ts, until_ts)
+    ).fetchall()
+    return [{'ts': r[0], 'cdn_name': r[1], 'domain': r[2], 'status_code': r[3], 'hit_count': r[4], 'request_path': r[5]} for r in rows]
+
+def get_domain_analytics(since_ts: int = None, until_ts: int = None):
+    if not since_ts:
+        since_ts = int(time.time()) - 86400
+    if not until_ts:
+        until_ts = int(time.time())
+    rows = conn.execute(
+        'SELECT domain, cdn_name, SUM(hit_count) as total_hits, COUNT(*) as records, '
+        'SUM(CASE WHEN status_code >= 400 THEN hit_count ELSE 0 END) as error_hits '
+        'FROM domain_hits WHERE ts BETWEEN ? AND ? GROUP BY domain ORDER BY total_hits DESC',
+        (since_ts, until_ts)
+    ).fetchall()
+    return [{'domain': r[0], 'cdn_name': r[1], 'total_hits': r[2] or 0, 'records': r[3], 'error_hits': r[4] or 0} for r in rows]
+
+def cleanup_old_domain_hits():
+    cutoff = int(time.time()) - (180 * 86400)
+    conn.execute('DELETE FROM domain_hits WHERE ts < ?', (cutoff,))
+    conn.commit()
+    logger.info(f'Cleaned up domain hits older than 180 days')
 
 def get_latest_rows_by_cdn():
     cdns = get_configured_cdns()
@@ -1130,34 +1187,40 @@ def domains_page(token: Optional[str] = Cookie(None)):
     username = username_from_token(token)
     if not username:
         return RedirectResponse(url='/login', status_code=303)
-    return f"""<!doctype html><html><head><title>Domain Hits Report</title>
+    return f"""<!doctype html><html><head><title>Domain Hits Analytics</title>
     <style>
     body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
     a{{color:#7fe8ff;text-decoration:none}}
     a:hover{{text-decoration:underline}}
-    .wrap{{max-width:1400px;margin:0 auto}}
+    .wrap{{max-width:1600px;margin:0 auto}}
     .nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}}
     .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
     .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520}}
     .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px;margin-top:16px}}
     .panel h2{{margin:0 0 12px 0;font-size:18px}}
     .muted{{opacity:.75}}
-    .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}}
-    .card{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:14px;text-align:center}}
+    .controls{{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}}
+    input,select{{background:#081018;color:#d8f7ff;border:1px solid #1f3b4d;padding:8px 12px;border-radius:6px}}
+    button{{background:#0f2a1e;color:#7bffad;border:1px solid #2c6a44;padding:8px 14px;border-radius:6px;cursor:pointer}}
+    button:hover{{background:#133523}}
+    .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin:16px 0}}
+    .card{{background:#081018;border:1px solid #1f3b4d;border-radius:12px;padding:12px;text-align:center}}
     .card .label{{font-size:11px;opacity:.7;margin-bottom:4px}}
-    .card .value{{font-size:24px;font-weight:700;color:#7fe8ff}}
+    .card .value{{font-size:22px;font-weight:700;color:#7fe8ff}}
     table{{border-collapse:collapse;width:100%;margin-top:12px}}
     td,th{{border:1px solid #1f3b4d;padding:10px;text-align:left;font-size:13px}}
     th{{background:#0d1e2e;color:#7fe8ff;font-weight:600}}
     tr:hover td{{background:#0d1e2e}}
     .empty{{padding:20px;text-align:center;opacity:.75}}
-    #pieChart{{margin:20px auto;display:block}}
+    .error-rate{{color:#ff6b6b;font-weight:600}}
+    .status-ok{{color:#27d36b}}
+    .status-error{{color:#ff6b6b}}
     </style>
     </head><body><div class='wrap'>
     <div class='nav'>
       <div>
-        <h1 style='margin:0'>Domain Hits Report</h1>
-        <div class='muted' style='margin-top:6px'>Track traffic by configured domains</div>
+        <h1 style='margin:0'>Domain Hits Analytics</h1>
+        <div class='muted' style='margin-top:6px'>6-month historical data with date filtering</div>
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
@@ -1169,159 +1232,124 @@ def domains_page(token: Optional[str] = Cookie(None)):
       </div>
     </div>
 
+    <div class='panel'>
+      <h2>Filter & Query</h2>
+      <div class='controls'>
+        <label style='margin:0'>Range:
+          <select id='rangeSelect'>
+            <option value='24h'>Last 24 hours</option>
+            <option value='7d'>Last 7 days</option>
+            <option value='30d'>Last 30 days</option>
+            <option value='90d'>Last 90 days</option>
+            <option value='180d'>Last 180 days</option>
+          </select>
+        </label>
+        <label style='margin:0'>Or Custom: From <input type='date' id='fromDate'> To <input type='date' id='toDate'></label>
+        <button onclick='loadAnalytics()'>Apply Filter</button>
+      </div>
+      <span id='filterMeta' class='muted' style='font-size:12px'></span>
+    </div>
+
     <div class='cards' id='summaryCards'></div>
 
     <div class='panel'>
-      <h2>Domain Traffic Distribution</h2>
-      <div style='display:grid;grid-template-columns:300px 1fr;gap:20px;align-items:start'>
-        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
-          <svg id='pieChart' width='280' height='280' style='display:block;margin:0 auto'></svg>
-        </div>
-        <div>
-          <div style='font-size:12px;opacity:.7;margin-bottom:10px;font-weight:600'>Top Domains by Connections</div>
-          <div id='domainsList'></div>
-        </div>
-      </div>
+      <h2>Domain Analytics</h2>
+      <div id='analyticsTable'></div>
     </div>
 
     <div class='panel'>
-      <h2>Domain Details</h2>
-      <div id='domainsTable'></div>
+      <h2>HTTP Status Code Distribution</h2>
+      <div style='display:grid;grid-template-columns:1fr 1fr;gap:20px'>
+        <div id='statusChart' style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px;min-height:200px'></div>
+        <div id='statusBreakdown' style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'></div>
+      </div>
     </div>
 
     </div>
     <script>
-    async function loadDomains(){{
-      const res = await fetch('/api/domain-stats');
-      const data = await res.json();
-      const domains = data.domains || [];
-      renderSummary(domains);
-      renderPieChart(domains);
-      renderDomainsList(domains);
-      renderTable(domains);
-    }}
+    const state = {{ range: '24h', fromTs: null, toTs: null }};
 
-    function renderSummary(domains){{
-      const summary = document.getElementById('summaryCards');
-      const total = domains.reduce((s, d) => s + (d.connection_count || 0), 0);
-      summary.replaceChildren();
+    async function getTimestampRange(){{
+      const now = Math.floor(Date.now() / 1000);
+      const rangeVal = document.getElementById('rangeSelect').value;
+      const fromDate = document.getElementById('fromDate').value;
+      const toDate = document.getElementById('toDate').value;
 
-      const card1 = document.createElement('div');
-      card1.className = 'card';
-      card1.innerHTML = '<div class="label">Total Domains</div><div class="value">' + domains.length + '</div>';
-      summary.appendChild(card1);
-
-      const card2 = document.createElement('div');
-      card2.className = 'card';
-      card2.innerHTML = '<div class="label">Total Connections</div><div class="value">' + total.toLocaleString() + '</div>';
-      summary.appendChild(card2);
-
-      if(domains.length){{
-        const top = domains[0];
-        const card3 = document.createElement('div');
-        card3.className = 'card';
-        card3.innerHTML = '<div class="label">Top Domain</div><div class="value" style="font-size:14px">' + top.domain + '</div>';
-        summary.appendChild(card3);
-
-        const card4 = document.createElement('div');
-        card4.className = 'card';
-        card4.innerHTML = '<div class="label">Top Connections</div><div class="value">' + (top.connection_count || 0).toLocaleString() + '</div>';
-        summary.appendChild(card4);
+      if(fromDate && toDate){{
+        state.fromTs = Math.floor(new Date(fromDate).getTime() / 1000);
+        state.toTs = Math.floor(new Date(toDate).getTime() / 1000) + 86400;
+      }} else {{
+        state.toTs = now;
+        const days = parseInt(rangeVal) || 1;
+        state.fromTs = now - (days * 86400);
       }}
     }}
 
-    function renderPieChart(domains){{
-      const svg = document.getElementById('pieChart');
-      const w = 280, h = 280, r = 80, cx = w / 2, cy = h / 2;
-      svg.setAttribute('viewBox', `0 0 ${{w}} ${{h}}`);
-      svg.replaceChildren();
+    async function loadAnalytics(){{
+      await getTimestampRange();
+      const from = new Date(state.fromTs * 1000).toLocaleDateString();
+      const to = new Date(state.toTs * 1000).toLocaleDateString();
+      document.getElementById('filterMeta').textContent = `Showing data from ${{from}} to ${{to}}`;
 
-      const total = domains.reduce((s, d) => s + (d.connection_count || 0), 0);
-      if(!total) return;
-
-      const colors = ['#7fe8ff','#ff8f70','#a4ff70','#d370ff','#ffd670','#70ffd8','#ffa8d8','#9cb2ff'];
-      let angle = -90;
-
-      domains.forEach((domain, idx) => {{
-        const pct = (domain.connection_count || 0) / total;
-        const sweep = pct * 360;
-        const rad1 = angle * Math.PI / 180;
-        const rad2 = (angle + sweep) * Math.PI / 180;
-        const x1 = cx + r * Math.cos(rad1);
-        const y1 = cy + r * Math.sin(rad1);
-        const x2 = cx + r * Math.cos(rad2);
-        const y2 = cy + r * Math.sin(rad2);
-        const large = sweep > 180 ? 1 : 0;
-
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        const d = `M ${{cx}} ${{cy}} L ${{x1}} ${{y1}} A ${{r}} ${{r}} 0 ${{large}} 1 ${{x2}} ${{y2}} Z`;
-        path.setAttribute('d', d);
-        path.setAttribute('fill', colors[idx % colors.length]);
-        path.setAttribute('opacity', '.85');
-        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-        title.textContent = domain.domain + ': ' + (domain.connection_count || 0) + ' (' + Math.round(pct * 100) + '%)';
-        path.appendChild(title);
-        svg.appendChild(path);
-        angle += sweep;
-      }});
-
-      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-      circle.setAttribute('cx', cx);
-      circle.setAttribute('cy', cy);
-      circle.setAttribute('r', 30);
-      circle.setAttribute('fill', '#081018');
-      svg.appendChild(circle);
-
-      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      text.setAttribute('x', cx);
-      text.setAttribute('y', cy + 5);
-      text.setAttribute('text-anchor', 'middle');
-      text.setAttribute('font-size', '14');
-      text.setAttribute('font-weight', '700');
-      text.setAttribute('fill', '#7fe8ff');
-      text.textContent = domains.length;
-      svg.appendChild(text);
+      const res = await fetch(`/api/domain-analytics?from_ts=${{state.fromTs}}&to_ts=${{state.toTs}}`);
+      const data = await res.json();
+      const analytics = data.analytics || [];
+      renderSummary(analytics);
+      renderTable(analytics);
+      renderStatusBreakdown(analytics);
     }}
 
-    function renderDomainsList(domains){{
-      const list = document.getElementById('domainsList');
-      const colors = ['#7fe8ff','#ff8f70','#a4ff70','#d370ff','#ffd670','#70ffd8','#ffa8d8','#9cb2ff'];
-      list.replaceChildren();
+    function renderSummary(analytics){{
+      const summary = document.getElementById('summaryCards');
+      const totalHits = analytics.reduce((s, a) => s + (a.total_hits || 0), 0);
+      const totalErrors = analytics.reduce((s, a) => s + (a.error_hits || 0), 0);
+      const errorRate = totalHits ? Math.round((totalErrors / totalHits) * 100) : 0;
 
-      domains.slice(0, 5).forEach((domain, idx) => {{
-        const item = document.createElement('div');
-        item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid #1f3b4d';
-        item.innerHTML = '<span style="width:12px;height:12px;border-radius:50%;background:' + colors[idx % colors.length] + ';flex:0 0 12px"></span>'
-          + '<span style="flex:1;font-weight:600">' + domain.domain + '</span>'
-          + '<span style="font-weight:700;color:' + colors[idx % colors.length] + '">' + (domain.connection_count || 0).toLocaleString() + '</span>';
-        list.appendChild(item);
+      summary.replaceChildren();
+
+      const cards = [
+        ['Total Hits', totalHits.toLocaleString()],
+        ['Total Domains', analytics.length.toString()],
+        ['Error Rate', errorRate + '%'],
+        ['Success Rate', (100 - errorRate) + '%']
+      ];
+
+      cards.forEach(([label, value]) => {{
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = '<div class="label">' + label + '</div><div class="value">' + value + '</div>';
+        summary.appendChild(card);
       }});
     }}
 
-    function renderTable(domains){{
-      const table = document.getElementById('domainsTable');
-      if(!domains.length){{ table.innerHTML = '<div class="empty">No domains configured yet.</div>'; return; }}
+    function renderTable(analytics){{
+      const table = document.getElementById('analyticsTable');
+      if(!analytics.length){{ table.innerHTML = '<div class="empty">No domain hits in selected period.</div>'; return; }}
 
       const t = document.createElement('table');
       const head = document.createElement('tr');
-      ['Domain','CDN Name','Connections','Description'].forEach(title => {{
+      ['Domain','CDN','Total Hits','Errors','Success Rate','Error Rate'].forEach(title => {{
         const th = document.createElement('th');
         th.textContent = title;
         head.appendChild(th);
       }});
       t.appendChild(head);
 
-      domains.forEach(domain => {{
+      analytics.forEach(a => {{
+        const errorRate = a.total_hits ? Math.round((a.error_hits / a.total_hits) * 100) : 0;
+        const successRate = 100 - errorRate;
         const tr = document.createElement('tr');
         const cells = [
-          domain.domain,
-          domain.cdn_name || '—',
-          (domain.connection_count || 0).toLocaleString(),
-          domain.description || '—'
+          a.domain,
+          a.cdn_name || '—',
+          a.total_hits.toLocaleString(),
+          '<span class="status-error">' + a.error_hits + '</span>',
+          '<span class="status-ok">' + successRate + '%</span>',
+          '<span class="error-rate">' + errorRate + '%</span>'
         ];
-        cells.forEach(text => {{
+        cells.forEach(html => {{
           const td = document.createElement('td');
-          td.textContent = text;
+          td.innerHTML = html;
           tr.appendChild(td);
         }});
         t.appendChild(tr);
@@ -1329,8 +1357,29 @@ def domains_page(token: Optional[str] = Cookie(None)):
       table.replaceChildren(t);
     }}
 
-    loadDomains();
-    setInterval(loadDomains, 10000);
+    function renderStatusBreakdown(analytics){{
+      const breakdown = document.getElementById('statusBreakdown');
+      const statusMap = {{}};
+      analytics.forEach(a => {{
+        const errorRate = a.total_hits ? Math.round((a.error_hits / a.total_hits) * 100) : 0;
+        statusMap['2xx Success'] = (statusMap['2xx Success'] || 0) + (a.total_hits - a.error_hits);
+        statusMap['4xx/5xx Errors'] = (statusMap['4xx/5xx Errors'] || 0) + a.error_hits;
+      }});
+
+      breakdown.replaceChildren();
+      Object.entries(statusMap).forEach(([status, count]) => {{
+        const div = document.createElement('div');
+        div.style.cssText = 'padding:8px;border-bottom:1px solid #1f3b4d';
+        const color = status.includes('Error') ? '#ff6b6b' : '#27d36b';
+        div.innerHTML = '<div style="color:' + color + ';font-weight:600">' + status + '</div>'
+          + '<div style="font-size:20px;font-weight:700;color:' + color + '">' + count.toLocaleString() + '</div>';
+        breakdown.appendChild(div);
+      }});
+    }}
+
+    // Initialize with last 24 hours
+    document.getElementById('rangeSelect').addEventListener('change', loadAnalytics);
+    loadAnalytics();
     </script></body></html>"""
 
 @app.get('/history', response_class=HTMLResponse)
@@ -1611,6 +1660,46 @@ def legacy_metrics(metric: LegacyMetricIn, x_api_key: Optional[str] = Header(Non
     )
     conn.commit()
     return {'status': 'ok', 'ts': ts, 'cdn_name': metric.server_id}
+
+class DomainHitIn(BaseModel):
+    cdn_name: str
+    domain: str
+    status_code: int
+    hit_count: int = 1
+    request_path: Optional[str] = None
+    referer: Optional[str] = None
+    user_agent: Optional[str] = None
+    ts: Optional[int] = None
+
+@app.post('/api/domain-hits')
+def submit_domain_hits(hits: list[DomainHitIn], x_api_key: Optional[str] = Header(None)):
+    if x_api_key not in (TOKEN, LEGACY_API_KEY):
+        raise HTTPException(status_code=401, detail='invalid api key')
+    now = int(time.time())
+    for hit in hits:
+        ts = hit.ts or now
+        conn.execute(
+            'INSERT INTO domain_hits(ts, cdn_name, domain, status_code, hit_count, request_path, referer, user_agent) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (ts, hit.cdn_name, hit.domain, hit.status_code, hit.hit_count, hit.request_path or '', hit.referer or '', hit.user_agent or '')
+        )
+    conn.commit()
+    cleanup_old_domain_hits()
+    return {'status': 'ok', 'count': len(hits)}
+
+@app.get('/api/domain-hits')
+def get_domain_hits(domain: str, from_ts: Optional[int] = None, to_ts: Optional[int] = None):
+    hits = query_domain_hits(domain, from_ts, to_ts)
+    return {'domain': domain, 'hits': hits}
+
+@app.get('/api/domain-analytics')
+def get_analytics(range: str = '24h', from_ts: Optional[int] = None, to_ts: Optional[int] = None):
+    if not from_ts or not to_ts:
+        spec = range_spec(range)
+        from_ts = spec['since']
+        to_ts = int(time.time())
+    analytics = get_domain_analytics(from_ts, to_ts)
+    return {'range': range, 'analytics': analytics, 'from': from_ts, 'to': to_ts}
 
 @app.get('/api/latest')
 def latest():
