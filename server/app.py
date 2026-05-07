@@ -44,6 +44,7 @@ BOOTSTRAP_ADMIN_USERNAME = os.getenv('BOOTSTRAP_ADMIN_USERNAME', 'admin')
 BOOTSTRAP_ADMIN_PASSWORD = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', 'cdn-monitor-2026!')
 AUTO_BOOTSTRAP_ADMIN = os.getenv('AUTO_BOOTSTRAP_ADMIN', 'true').lower() in ('1', 'true', 'yes', 'on')
 MAP_CONFIG_FILE = os.getenv('MAP_CONFIG_FILE', '/app/data/cdn_map.json')
+DOMAIN_CONFIG_FILE = os.getenv('DOMAIN_CONFIG_FILE', '/app/data/domain_config.json')
 
 BANGLADESH_PLACES = {
     'dhaka':       {'label': 'Dhaka',        'lat': 23.8103, 'lon': 90.4125, 'landmark': 'Jatiyo Sangsad Bhaban', 'emoji': '🏛️'},
@@ -308,6 +309,37 @@ def save_map_config_raw(raw):
     with open(MAP_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(raw, f, indent=2, ensure_ascii=False, sort_keys=True)
 
+def load_domain_config():
+    try:
+        with open(DOMAIN_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f) or {}
+            return raw if isinstance(raw, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning('Failed to read domain config: %s', exc)
+        return {}
+
+def get_domain_stats():
+    config = load_domain_config()
+    if not config:
+        return []
+    latest_rows = get_latest_rows_by_cdn()
+    domains = []
+    for domain_name, domain_info in config.items():
+        if isinstance(domain_info, dict):
+            cdn_name = domain_info.get('cdn_name')
+            if cdn_name and cdn_name in latest_rows:
+                row = latest_rows[cdn_name]
+                domains.append({
+                    'domain': domain_name,
+                    'cdn_name': cdn_name,
+                    'connection_count': row.get('connection_count', 0),
+                    'ts': row.get('ts'),
+                    'description': domain_info.get('description', '')
+                })
+    return sorted(domains, key=lambda x: x['connection_count'], reverse=True)
+
 def get_latest_rows_by_cdn():
     cdns = get_configured_cdns()
     if not cdns:
@@ -410,15 +442,21 @@ def dashboard(token: Optional[str] = Cookie(None)):
     .empty{{padding:16px 0;opacity:.75}}
     .dot-live{{display:inline-block;width:8px;height:8px;border-radius:50%;background:#27d36b;animation:dotpulse 1.4s infinite;margin-right:5px;vertical-align:middle}}
     @keyframes dotpulse{{0%{{box-shadow:0 0 0 0 rgba(39,211,107,.7)}}70%{{box-shadow:0 0 0 6px rgba(39,211,107,0)}}100%{{box-shadow:0 0 0 0 rgba(39,211,107,0)}}}}
+    .status-indicator{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle;animation:statusPulse 1.2s ease-in-out infinite}}
+    .status-up{{background:#27d36b}}
+    .status-down{{background:#ff6b6b}}
+    .status-stable{{background:#5aa8ff}}
+    @keyframes statusPulse{{0%,100%{{opacity:1}}50%{{opacity:0.6}}}}
     </style>
     </head><body><div class='wrap'>
     <div class='nav'>
       <div>
         <h1 style='margin:0'>CDN Monitoring System</h1>
-        <div class='muted' style='margin-top:6px'>Interactive overview, map, and history</div>
+        <div class='muted' style='margin-top:6px'>Real-time analytics dashboard</div>
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
+        <a class='badge' href='/domains'>Domains</a>
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
@@ -437,13 +475,33 @@ def dashboard(token: Optional[str] = Cookie(None)):
     </div>
 
     <div class='panel'>
-      <h2>Connection Graph <span id='homeMeta' class='muted' style='font-size:13px;font-weight:400;margin-left:8px'></span></h2>
-      <div class='chart-wrap' style='height:360px'><canvas id='homeChart'></canvas></div>
-      <div id='legend' class='legend' style='margin-top:10px'></div>
+      <h2>Real-time Analytics <span id='homeMeta' class='muted' style='font-size:13px;font-weight:400;margin-left:8px'></span></h2>
+      <div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px'>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px;min-height:320px'>
+          <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>Connections Over Time</div>
+          <div class='chart-wrap' style='height:280px;padding:0'><canvas id='homeChart'></canvas></div>
+        </div>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px;min-height:320px'>
+          <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>Peak Load Status</div>
+          <div style='display:flex;align-items:center;justify-content:center;height:280px'>
+            <svg id='gaugeChart' width='200' height='200' style='max-width:100%;height:auto'></svg>
+          </div>
+        </div>
+      </div>
+      <div style='display:grid;grid-template-columns:1fr 1fr;gap:16px'>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
+          <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>Top CDNs by Connections</div>
+          <div id='topCdnsChart' style='height:220px'></div>
+        </div>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
+          <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>Legend</div>
+          <div id='legend' class='legend' style='display:flex;flex-direction:column;gap:6px;margin-top:0'></div>
+        </div>
+      </div>
     </div>
 
     <div class='panel'>
-      <h2>Latest rows</h2>
+      <h2>Latest CDN Status</h2>
       <div id='latestTable'></div>
     </div>
 
@@ -507,6 +565,106 @@ def dashboard(token: Optional[str] = Cookie(None)):
         btn.onclick = () => {{ state.hidden[name] = !state.hidden[name]; loadGraphs(); }};
         legend.appendChild(btn);
       }});
+    }}
+
+    function renderGauge(items){{
+      const canvas = document.getElementById('gaugeChart');
+      if(!canvas) return;
+      const w = 180, h = 180, r = 70;
+      canvas.setAttribute('viewBox', `0 0 ${{w}} ${{h}}`);
+      canvas.replaceChildren();
+
+      const total = items.reduce((s, i) => s + Number(i.connection_count || 0), 0);
+      const max = items.length ? Math.max(...items.map(i => Number(i.connection_count || 0))) * 2 : 100;
+      const pct = total / max;
+      const clampedPct = Math.min(1, Math.max(0, pct));
+      const angle = clampedPct * 240 - 120;
+
+      const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      bg.setAttribute('cx', w/2); bg.setAttribute('cy', h/2); bg.setAttribute('r', r);
+      bg.setAttribute('fill', 'none'); bg.setAttribute('stroke', '#1f3b4d'); bg.setAttribute('stroke-width', '8');
+      canvas.appendChild(bg);
+
+      const color = clampedPct > 0.8 ? '#ff6b6b' : (clampedPct > 0.5 ? '#ffd670' : '#27d36b');
+      const gauge = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      const startAngle = -120 * Math.PI / 180;
+      const endAngle = (angle) * Math.PI / 180;
+      const x1 = w/2 + r * Math.cos(startAngle);
+      const y1 = h/2 + r * Math.sin(startAngle);
+      const x2 = w/2 + r * Math.cos(endAngle);
+      const y2 = h/2 + r * Math.sin(endAngle);
+      const large = Math.abs(endAngle - startAngle) > Math.PI ? 1 : 0;
+      const d = `M ${{x1}} ${{y1}} A ${{r}} ${{r}} 0 ${{large}} 1 ${{x2}} ${{y2}}`;
+      gauge.setAttribute('d', d);
+      gauge.setAttribute('stroke', color);
+      gauge.setAttribute('stroke-width', '8');
+      gauge.setAttribute('fill', 'none');
+      gauge.setAttribute('stroke-linecap', 'round');
+      canvas.appendChild(gauge);
+
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', w/2); text.setAttribute('y', h/2 + 8);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '32');
+      text.setAttribute('font-weight', '700');
+      text.setAttribute('fill', color);
+      text.textContent = Math.round(clampedPct * 100) + '%';
+      canvas.appendChild(text);
+
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', w/2); label.setAttribute('y', h/2 + 30);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('font-size', '11');
+      label.setAttribute('fill', '#7fe8ff');
+      label.setAttribute('opacity', '.7');
+      label.textContent = total.toLocaleString() + ' / ' + Math.round(max).toLocaleString();
+      canvas.appendChild(label);
+    }}
+
+    function renderTopCdns(items){{
+      const target = document.getElementById('topCdnsChart');
+      if(!target) return;
+      const sorted = [...items].sort((a,b) => Number(b.connection_count||0) - Number(a.connection_count||0)).slice(0, 5);
+      if(!sorted.length) {{ target.innerHTML = '<div class="empty">No data</div>'; return; }}
+
+      const max = sorted[0].connection_count || 1;
+      const h = 20, gap = 35;
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('width', '100%');
+      svg.setAttribute('height', '220');
+      svg.setAttribute('viewBox', '0 0 300 ' + (gap * sorted.length));
+
+      sorted.forEach((item, idx) => {{
+        const y = idx * gap;
+        const width = (item.connection_count / max) * 200;
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', '60');
+        rect.setAttribute('y', y + 2);
+        rect.setAttribute('width', width);
+        rect.setAttribute('height', h);
+        rect.setAttribute('fill', palette[idx % palette.length]);
+        rect.setAttribute('rx', '4');
+        rect.setAttribute('opacity', '.8');
+        svg.appendChild(rect);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', '4');
+        label.setAttribute('y', y + h + 4);
+        label.setAttribute('font-size', '11');
+        label.setAttribute('fill', '#7fe8ff');
+        label.textContent = item.cdn_name;
+        svg.appendChild(label);
+
+        const count = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        count.setAttribute('x', width + 65);
+        count.setAttribute('y', y + h + 4);
+        count.setAttribute('font-size', '11');
+        count.setAttribute('fill', '#d8f7ff');
+        count.setAttribute('font-weight', '700');
+        count.textContent = item.connection_count.toLocaleString();
+        svg.appendChild(count);
+      }});
+      target.replaceChildren(svg);
     }}
 
     function renderHomeChart(series){{
@@ -593,6 +751,8 @@ def dashboard(token: Optional[str] = Cookie(None)):
       renderCards(items);
       renderLegend(series.series || {{}});
       renderHomeChart(series.series || {{}});
+      renderGauge(items);
+      renderTopCdns(items);
       renderLatestTable(items);
     }}
 
@@ -651,6 +811,7 @@ def map_page(token: Optional[str] = Cookie(None)):
       <div><h1 style='margin:0;font-size:20px'>CDN MAP</h1></div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
+        <a class='badge' href='/domains'>Domains</a>
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
@@ -818,6 +979,7 @@ def management_page(token: Optional[str] = Cookie(None)):
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
+        <a class='badge' href='/domains'>Domains</a>
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
@@ -963,6 +1125,214 @@ INGEST_TOKEN=...</pre>
     refreshConfig();
     </script></body></html>""".replace('__USERNAME__', html.escape(username))
 
+@app.get('/domains', response_class=HTMLResponse)
+def domains_page(token: Optional[str] = Cookie(None)):
+    username = username_from_token(token)
+    if not username:
+        return RedirectResponse(url='/login', status_code=303)
+    return f"""<!doctype html><html><head><title>Domain Hits Report</title>
+    <style>
+    body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
+    a{{color:#7fe8ff;text-decoration:none}}
+    a:hover{{text-decoration:underline}}
+    .wrap{{max-width:1400px;margin:0 auto}}
+    .nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}}
+    .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
+    .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520}}
+    .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px;margin-top:16px}}
+    .panel h2{{margin:0 0 12px 0;font-size:18px}}
+    .muted{{opacity:.75}}
+    .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}}
+    .card{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:14px;text-align:center}}
+    .card .label{{font-size:11px;opacity:.7;margin-bottom:4px}}
+    .card .value{{font-size:24px;font-weight:700;color:#7fe8ff}}
+    table{{border-collapse:collapse;width:100%;margin-top:12px}}
+    td,th{{border:1px solid #1f3b4d;padding:10px;text-align:left;font-size:13px}}
+    th{{background:#0d1e2e;color:#7fe8ff;font-weight:600}}
+    tr:hover td{{background:#0d1e2e}}
+    .empty{{padding:20px;text-align:center;opacity:.75}}
+    #pieChart{{margin:20px auto;display:block}}
+    </style>
+    </head><body><div class='wrap'>
+    <div class='nav'>
+      <div>
+        <h1 style='margin:0'>Domain Hits Report</h1>
+        <div class='muted' style='margin-top:6px'>Track traffic by configured domains</div>
+      </div>
+      <div class='navlinks'>
+        <a class='badge' href='/'>Home</a>
+        <a class='badge' href='/domains'>Domains</a>
+        <a class='badge' href='/map'>CDN MAP</a>
+        <a class='badge' href='/history'>History</a>
+        <a class='badge' href='/management'>Management</a>
+        <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
+      </div>
+    </div>
+
+    <div class='cards' id='summaryCards'></div>
+
+    <div class='panel'>
+      <h2>Domain Traffic Distribution</h2>
+      <div style='display:grid;grid-template-columns:300px 1fr;gap:20px;align-items:start'>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
+          <svg id='pieChart' width='280' height='280' style='display:block;margin:0 auto'></svg>
+        </div>
+        <div>
+          <div style='font-size:12px;opacity:.7;margin-bottom:10px;font-weight:600'>Top Domains by Connections</div>
+          <div id='domainsList'></div>
+        </div>
+      </div>
+    </div>
+
+    <div class='panel'>
+      <h2>Domain Details</h2>
+      <div id='domainsTable'></div>
+    </div>
+
+    </div>
+    <script>
+    async function loadDomains(){{
+      const res = await fetch('/api/domain-stats');
+      const data = await res.json();
+      const domains = data.domains || [];
+      renderSummary(domains);
+      renderPieChart(domains);
+      renderDomainsList(domains);
+      renderTable(domains);
+    }}
+
+    function renderSummary(domains){{
+      const summary = document.getElementById('summaryCards');
+      const total = domains.reduce((s, d) => s + (d.connection_count || 0), 0);
+      summary.replaceChildren();
+
+      const card1 = document.createElement('div');
+      card1.className = 'card';
+      card1.innerHTML = '<div class="label">Total Domains</div><div class="value">' + domains.length + '</div>';
+      summary.appendChild(card1);
+
+      const card2 = document.createElement('div');
+      card2.className = 'card';
+      card2.innerHTML = '<div class="label">Total Connections</div><div class="value">' + total.toLocaleString() + '</div>';
+      summary.appendChild(card2);
+
+      if(domains.length){{
+        const top = domains[0];
+        const card3 = document.createElement('div');
+        card3.className = 'card';
+        card3.innerHTML = '<div class="label">Top Domain</div><div class="value" style="font-size:14px">' + top.domain + '</div>';
+        summary.appendChild(card3);
+
+        const card4 = document.createElement('div');
+        card4.className = 'card';
+        card4.innerHTML = '<div class="label">Top Connections</div><div class="value">' + (top.connection_count || 0).toLocaleString() + '</div>';
+        summary.appendChild(card4);
+      }}
+    }}
+
+    function renderPieChart(domains){{
+      const svg = document.getElementById('pieChart');
+      const w = 280, h = 280, r = 80, cx = w / 2, cy = h / 2;
+      svg.setAttribute('viewBox', `0 0 ${{w}} ${{h}}`);
+      svg.replaceChildren();
+
+      const total = domains.reduce((s, d) => s + (d.connection_count || 0), 0);
+      if(!total) return;
+
+      const colors = ['#7fe8ff','#ff8f70','#a4ff70','#d370ff','#ffd670','#70ffd8','#ffa8d8','#9cb2ff'];
+      let angle = -90;
+
+      domains.forEach((domain, idx) => {{
+        const pct = (domain.connection_count || 0) / total;
+        const sweep = pct * 360;
+        const rad1 = angle * Math.PI / 180;
+        const rad2 = (angle + sweep) * Math.PI / 180;
+        const x1 = cx + r * Math.cos(rad1);
+        const y1 = cy + r * Math.sin(rad1);
+        const x2 = cx + r * Math.cos(rad2);
+        const y2 = cy + r * Math.sin(rad2);
+        const large = sweep > 180 ? 1 : 0;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const d = `M ${{cx}} ${{cy}} L ${{x1}} ${{y1}} A ${{r}} ${{r}} 0 ${{large}} 1 ${{x2}} ${{y2}} Z`;
+        path.setAttribute('d', d);
+        path.setAttribute('fill', colors[idx % colors.length]);
+        path.setAttribute('opacity', '.85');
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = domain.domain + ': ' + (domain.connection_count || 0) + ' (' + Math.round(pct * 100) + '%)';
+        path.appendChild(title);
+        svg.appendChild(path);
+        angle += sweep;
+      }});
+
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', cx);
+      circle.setAttribute('cy', cy);
+      circle.setAttribute('r', 30);
+      circle.setAttribute('fill', '#081018');
+      svg.appendChild(circle);
+
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', cx);
+      text.setAttribute('y', cy + 5);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '14');
+      text.setAttribute('font-weight', '700');
+      text.setAttribute('fill', '#7fe8ff');
+      text.textContent = domains.length;
+      svg.appendChild(text);
+    }}
+
+    function renderDomainsList(domains){{
+      const list = document.getElementById('domainsList');
+      const colors = ['#7fe8ff','#ff8f70','#a4ff70','#d370ff','#ffd670','#70ffd8','#ffa8d8','#9cb2ff'];
+      list.replaceChildren();
+
+      domains.slice(0, 5).forEach((domain, idx) => {{
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid #1f3b4d';
+        item.innerHTML = '<span style="width:12px;height:12px;border-radius:50%;background:' + colors[idx % colors.length] + ';flex:0 0 12px"></span>'
+          + '<span style="flex:1;font-weight:600">' + domain.domain + '</span>'
+          + '<span style="font-weight:700;color:' + colors[idx % colors.length] + '">' + (domain.connection_count || 0).toLocaleString() + '</span>';
+        list.appendChild(item);
+      }});
+    }}
+
+    function renderTable(domains){{
+      const table = document.getElementById('domainsTable');
+      if(!domains.length){{ table.innerHTML = '<div class="empty">No domains configured yet.</div>'; return; }}
+
+      const t = document.createElement('table');
+      const head = document.createElement('tr');
+      ['Domain','CDN Name','Connections','Description'].forEach(title => {{
+        const th = document.createElement('th');
+        th.textContent = title;
+        head.appendChild(th);
+      }});
+      t.appendChild(head);
+
+      domains.forEach(domain => {{
+        const tr = document.createElement('tr');
+        const cells = [
+          domain.domain,
+          domain.cdn_name || '—',
+          (domain.connection_count || 0).toLocaleString(),
+          domain.description || '—'
+        ];
+        cells.forEach(text => {{
+          const td = document.createElement('td');
+          td.textContent = text;
+          tr.appendChild(td);
+        }});
+        t.appendChild(tr);
+      }});
+      table.replaceChildren(t);
+    }}
+
+    loadDomains();
+    setInterval(loadDomains, 10000);
+    </script></body></html>"""
+
 @app.get('/history', response_class=HTMLResponse)
 def history_page(token: Optional[str] = Cookie(None)):
     username = username_from_token(token)
@@ -980,7 +1350,7 @@ def history_page(token: Optional[str] = Cookie(None)):
     .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px;margin-top:16px}}
     .controls{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}
     select{{background:#081018;color:#d8f7ff;border:1px solid #1f3b4d;padding:8px;border-radius:6px}}
-    .chart{{width:100%;height:340px;display:block;background:#081018;border:1px solid #1f3b4d;border-radius:10px}}
+    .chart{{width:100%;height:340px;display:block}}
     .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}}
     .card{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:14px}}
     .card .label{{font-size:12px;opacity:.75;margin-bottom:6px}}
@@ -990,6 +1360,14 @@ def history_page(token: Optional[str] = Cookie(None)):
     .muted{{opacity:.75}}
     .empty{{padding:16px 0;opacity:.75}}
     .live-note{{margin-top:8px;font-size:12px;opacity:.8}}
+    .wave-line{{fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-width:3;animation:waveFlow 1.2s ease-in-out infinite}}
+    .wave-fill{{fill-opacity:0.08;animation:wavePulse 1.2s ease-in-out infinite}}
+    @keyframes waveFlow{{0%{{stroke-dashoffset:0}}50%{{stroke-dashoffset:8}}100%{{stroke-dashoffset:0}}}}
+    @keyframes wavePulse{{0%{{fill-opacity:0.08}}50%{{fill-opacity:0.12}}100%{{fill-opacity:0.08}}}}
+    .wave-circle{{animation:pointBeat 1s cubic-bezier(0.4,0,0.6,1) infinite}}
+    @keyframes pointBeat{{0%,100%{{r:3.5;opacity:.8}}50%{{r:5;opacity:1}}}}
+    .wave-circle.latest{{animation:latestPulse 0.8s cubic-bezier(0.4,0,0.6,1) infinite;r:6}}
+    @keyframes latestPulse{{0%,100%{{r:6}}50%{{r:8}}}}
     </style>
     </head><body><div class='wrap'>
     <div class='nav'>
@@ -1018,9 +1396,12 @@ def history_page(token: Optional[str] = Cookie(None)):
         <span id='historyTrend' class='badge' style='border-color:#5aa8ff'>Stable</span>
       </div>
       <div class='cards' id='historyCards'></div>
-      <svg id='historyChart' class='chart' viewBox='0 0 1200 340' preserveAspectRatio='none'></svg>
+      <div style='position:relative;width:100%;height:360px;background:#081018;border:1px solid #1f3b4d;border-radius:10px;overflow:hidden'>
+        <svg id='historyChart' class='chart' viewBox='0 0 1200 340' preserveAspectRatio='none' style='width:100%;height:100%;display:block'></svg>
+        <div id='historyChartOverlay' style='position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none'></div>
+      </div>
       <div id='historyEmpty' class='empty' style='display:none'>No historical data for this selection yet.</div>
-      <div class='live-note'>Live view refreshes every 10 seconds.</div>
+      <div class='live-note'>Live wave graph updates every 10 seconds • Green (new) • Red (dropped) • Blue (stable)</div>
     </div>
 
     <div class='panel'>
@@ -1094,29 +1475,32 @@ def history_page(token: Optional[str] = Cookie(None)):
         fill.setAttribute('d', topPath + ' L ' + xAt(points[points.length-1].ts).toFixed(1) + ' ' + (h-padB) + ' L ' + xAt(points[0].ts).toFixed(1) + ' ' + (h-padB) + ' Z');
         fill.setAttribute('fill', 'rgba(127,232,255,.08)');
         fill.setAttribute('stroke', 'none');
+        fill.setAttribute('class', 'wave-fill');
         svg.appendChild(fill);
 
         const path=document.createElementNS('http://www.w3.org/2000/svg','path');
         path.setAttribute('d', topPath);
         path.setAttribute('fill', 'none');
         path.setAttribute('stroke', trend.color);
-        path.setAttribute('stroke-width', '3');
-        path.setAttribute('stroke-linecap', 'round');
-        path.setAttribute('stroke-linejoin', 'round');
+        path.setAttribute('class', 'wave-line');
+        const pathLen = path.getTotalLength ? path.getTotalLength() : 0;
+        if(pathLen) {{ path.setAttribute('stroke-dasharray', pathLen); }}
         svg.appendChild(path);
       }}
 
       points.forEach((point, idx) => {{
         const delta = idx ? Number(point.connection_count || 0) - Number(points[idx - 1].connection_count || 0) : 0;
         const pointTrend = trendFor(delta);
+        const isLatest = idx === points.length - 1;
         const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');
         circle.setAttribute('cx', xAt(point.ts));
         circle.setAttribute('cy', yAt(point.connection_count));
-        circle.setAttribute('r', idx === points.length - 1 ? '6' : '3.5');
-        circle.setAttribute('fill', idx === points.length - 1 ? pointTrend.color : '#d8f7ff');
-        circle.setAttribute('opacity', idx === points.length - 1 ? '1' : '.8');
+        circle.setAttribute('r', isLatest ? '6' : '3.5');
+        circle.setAttribute('fill', isLatest ? pointTrend.color : '#d8f7ff');
+        circle.setAttribute('opacity', isLatest ? '1' : '.8');
+        circle.setAttribute('class', 'wave-circle' + (isLatest ? ' latest' : ''));
         const title=document.createElementNS('http://www.w3.org/2000/svg','title');
-        title.textContent = point.connection_count + ' @ ' + new Date(point.ts*1000).toLocaleString();
+        title.textContent = point.connection_count + ' connections @ ' + new Date(point.ts*1000).toLocaleString();
         circle.appendChild(title);
         svg.appendChild(circle);
       }});
@@ -1243,6 +1627,10 @@ def series(range: str = '24h'):
     for cdn_name in get_configured_cdns():
         series_data.setdefault(cdn_name, [])
     return {'range': range, 'label': spec['label'], 'stepLabel': spec['stepLabel'], 'series': series_data}
+
+@app.get('/api/domain-stats')
+def domain_stats():
+    return {'domains': get_domain_stats()}
 
 @app.get('/api/map-config')
 def map_config():

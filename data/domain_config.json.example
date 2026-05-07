@@ -1,0 +1,18 @@
+{
+  "api.example.com": {
+    "cdn_name": "cdn1",
+    "description": "API endpoints for main service"
+  },
+  "cdn.example.com": {
+    "cdn_name": "cdn1",
+    "description": "CDN for media content"
+  },
+  "static.example.com": {
+    "cdn_name": "cdn2",
+    "description": "Static assets distribution"
+  },
+  "video.example.com": {
+    "cdn_name": "cdn2",
+    "description": "Video streaming endpoint"
+  }
+}
