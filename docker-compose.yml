@@ -16,15 +16,6 @@ services:
       - ./data:/app/data
     restart: unless-stopped
 
-  agent:
-    build: ./agent
-    env_file: .env
-    container_name: cdn-agent
-    networks: [monitor-net]
-    depends_on:
-      - server
-    restart: unless-stopped
-
   nginx:
     image: nginx:1.25-alpine
     container_name: cdn-nginx
