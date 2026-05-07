@@ -448,8 +448,8 @@ def login_page():
     <form method='post' action='/api/login'><input type='text' name='username' placeholder='Username' required>
     <input type='password' name='password' placeholder='Password' required><button type='submit'>Login</button></form>{bootstrap_hint}</div></body></html>""".format(bootstrap_hint=bootstrap_hint)
 
-@app.get('/api/login')
-def api_login(username: str, password: str):
+@app.post('/api/login')
+def api_login(username: str = Form(...), password: str = Form(...)):
     user = conn.execute('SELECT hashed_password FROM users WHERE username=?', (username,)).fetchone()
     if not user or not verify_password(password, user[0]):
         logger.warning(f'Failed login attempt for user: {username}')
