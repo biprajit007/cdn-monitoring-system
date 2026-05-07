@@ -355,21 +355,10 @@ def login_page():
     button{{width:100%;padding:10px;margin-top:10px;background:#1f3b4d;color:#7fe8ff;border:1px solid #7fe8ff;cursor:pointer}}button:hover{{background:#2a4a5d}}
     .error{{color:#ff6b6b;margin-bottom:10px}}</style>
     </head><body><div class='login-box'><h1>CDN Monitor</h1>
-    <form method='get' action='/api/login'><input type='text' name='username' placeholder='Username' required>
+    <form method='post' action='/api/login'><input type='text' name='username' placeholder='Username' required>
     <input type='password' name='password' placeholder='Password' required><button type='submit'>Login</button></form>{bootstrap_hint}</div></body></html>""".format(bootstrap_hint=bootstrap_hint)
 
 @app.get('/api/login')
-def api_login(username: str, password: str):
-    user = conn.execute('SELECT hashed_password FROM users WHERE username=?', (username,)).fetchone()
-    if not user or not verify_password(password, user[0]):
-        logger.warning(f'Failed login attempt for user: {username}')
-        raise HTTPException(status_code=401, detail='Invalid credentials')
-    token = create_token(username)
-    response = RedirectResponse(url='/', status_code=303)
-    response.set_cookie(key='token', value=token, httponly=True, max_age=SESSION_HOURS*3600)
-    logger.info(f'User logged in: {username}')
-    return response
-
 def api_login(username: str, password: str):
     user = conn.execute('SELECT hashed_password FROM users WHERE username=?', (username,)).fetchone()
     if not user or not verify_password(password, user[0]):
@@ -539,7 +528,7 @@ def dashboard(token: Optional[str] = Cookie(None)):
           backgroundColor: color.replace(')', ', 0.08)').replace('rgb','rgba').replace('#', 'rgba(').replace(/rgba\(([0-9a-f]{{2}})([0-9a-f]{{2}})([0-9a-f]{{2}})/i, (_,r,g,b)=>`rgba(${{parseInt(r,16)}},${{parseInt(g,16)}},${{parseInt(b,16)}}`),
           borderWidth: 2.5,
           pointRadius: 3,
-          pointHoverRadius: 7,
+          pointHoverRadius: 6,
           tension: 0.4,
           fill: true,
           spanGaps: true,
@@ -551,13 +540,12 @@ def dashboard(token: Optional[str] = Cookie(None)):
         data: {{ labels, datasets }},
         options: {{
           responsive: true,
-          animation: { duration: 600, easing: 'easeInOutQuad'},
           maintainAspectRatio: false,
           interaction: {{ mode: 'index', intersect: false }},
           plugins: {{
             legend: {{ display: false }},
             tooltip: {{
-              backgroundColor: 'rgba(10,21,32,0.98)',
+              backgroundColor: 'rgba(10,21,32,0.95)',
               borderColor: '#1f3b4d',
               borderWidth: 1,
               titleColor: '#7fe8ff',
