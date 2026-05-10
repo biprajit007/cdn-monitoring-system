@@ -13,51 +13,6 @@ logger = logging.getLogger(__name__)
 DB = '/app/data/metrics.db'
 os.makedirs(os.path.dirname(DB), exist_ok=True)
 conn = sqlite3.connect(DB, check_same_thread=False, isolation_level=None, timeout=10)
-conn.execute("""
-CREATE TABLE IF NOT EXISTS metrics (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- ts INTEGER NOT NULL,
- cdn_name TEXT NOT NULL,
- host TEXT NOT NULL,
- target_port INTEGER NOT NULL,
- connection_count INTEGER NOT NULL
-)
-""")
-conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_cdn_ts ON metrics(cdn_name, ts)")
-conn.execute("""
-CREATE TABLE IF NOT EXISTS users (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- username TEXT UNIQUE NOT NULL,
- hashed_password TEXT NOT NULL,
- created_at INTEGER NOT NULL
-)
-""")
-conn.execute("""
-CREATE TABLE IF NOT EXISTS domain_config (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- domain TEXT UNIQUE NOT NULL,
- cdn_name TEXT NOT NULL,
- description TEXT,
- enabled BOOLEAN DEFAULT 1,
- created_at INTEGER NOT NULL
-)
-""")
-conn.execute("""
-CREATE TABLE IF NOT EXISTS domain_hits (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- ts INTEGER NOT NULL,
- cdn_name TEXT NOT NULL,
- domain TEXT NOT NULL,
- referer TEXT,
- user_agent TEXT,
- status_code INTEGER,
- bytes_sent INTEGER,
- request_path TEXT,
- hit_count INTEGER DEFAULT 1
-)
-""")
-conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_hits_ts_domain ON domain_hits(cdn_name, ts, domain)")
-conn.execute("CREATE INDEX IF NOT EXISTS idx_domain_hits_domain ON domain_hits(domain)")
 conn.commit()
 
 TOKEN = os.getenv('INGEST_TOKEN', 'change-me')
@@ -71,7 +26,6 @@ BOOTSTRAP_ADMIN_PASSWORD = os.getenv('BOOTSTRAP_ADMIN_PASSWORD', 'cdn-monitor-20
 AUTO_BOOTSTRAP_ADMIN = os.getenv('AUTO_BOOTSTRAP_ADMIN', 'true').lower() in ('1', 'true', 'yes', 'on')
 DATA_DIR = os.getenv('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
 MAP_CONFIG_FILE = os.getenv('MAP_CONFIG_FILE', os.path.join(DATA_DIR, 'cdn_map.json'))
-DOMAIN_CONFIG_FILE = os.getenv('DOMAIN_CONFIG_FILE', os.path.join(DATA_DIR, 'domain_config.json'))
 
 BANGLADESH_PLACES = {
     'dhaka':       {'label': 'Dhaka',        'lat': 23.8103, 'lon': 90.4125, 'landmark': 'Jatiyo Sangsad Bhaban', 'emoji': '🏛️'},
@@ -157,6 +111,8 @@ class LegacyMetricIn(BaseModel):
     server_ip: Optional[str] = None
     connection_count: int
     timestamp: Optional[str] = None
+    tx_bps: Optional[int] = 0
+    rx_bps: Optional[int] = 0
 
 class MapConfigIn(BaseModel):
     cdn_name: str
@@ -220,6 +176,15 @@ def bootstrap_admin_if_needed():
 
 @app.on_event('startup')
 def startup():
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.commit()
+    for col in ('tx_bps', 'rx_bps'):
+        try:
+            conn.execute(f'ALTER TABLE metrics ADD COLUMN {col} INTEGER DEFAULT 0')
+            conn.commit()
+        except Exception:
+            pass
     bootstrap_admin_if_needed()
 
 def range_spec(range_key: str):
@@ -336,77 +301,10 @@ def save_map_config_raw(raw):
     with open(MAP_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(raw, f, indent=2, ensure_ascii=False, sort_keys=True)
 
-def load_domain_config():
-    try:
-        with open(DOMAIN_CONFIG_FILE, 'r', encoding='utf-8') as f:
-            raw = json.load(f) or {}
-            return raw if isinstance(raw, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except Exception as exc:
-        logger.warning('Failed to read domain config: %s', exc)
-        return {}
 
-def get_domain_stats():
-    config = load_domain_config()
-    if not config:
-        return []
-    latest_rows = get_latest_rows_by_cdn()
-    domains = []
-    for domain_name, domain_info in config.items():
-        if isinstance(domain_info, dict):
-            cdn_name = domain_info.get('cdn_name')
-            if cdn_name and cdn_name in latest_rows:
-                row = latest_rows[cdn_name]
-                domains.append({
-                    'domain': domain_name,
-                    'cdn_name': cdn_name,
-                    'connection_count': row.get('connection_count', 0),
-                    'ts': row.get('ts'),
-                    'description': domain_info.get('description', '')
-                })
-    return sorted(domains, key=lambda x: x['connection_count'], reverse=True)
 
-def query_domain_hits(domain: str, since_ts: int = None, until_ts: int = None):
-    if not since_ts:
-        since_ts = int(time.time()) - 86400
-    if not until_ts:
-        until_ts = int(time.time())
-    rows = conn.execute(
-        'SELECT ts, cdn_name, domain, status_code, hit_count, request_path FROM domain_hits '
-        'WHERE domain=? AND ts BETWEEN ? AND ? ORDER BY ts DESC',
-        (domain, since_ts, until_ts)
-    ).fetchall()
-    return [{'ts': r[0], 'cdn_name': r[1], 'domain': r[2], 'status_code': r[3], 'hit_count': r[4], 'request_path': r[5]} for r in rows]
 
-def get_domain_analytics(since_ts: int = None, until_ts: int = None):
-    if not since_ts:
-        since_ts = int(time.time()) - 86400
-    if not until_ts:
-        until_ts = int(time.time())
 
-    excluded_domains = {'direct', 'iscreen.com.bd'}
-    rows = conn.execute(
-        'SELECT domain, cdn_name, COUNT(DISTINCT referer || "|" || user_agent) as total_hits, COUNT(*) as records, '
-        'SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_hits '
-        'FROM domain_hits WHERE ts BETWEEN ? AND ? GROUP BY domain ORDER BY total_hits DESC',
-        (since_ts, until_ts)
-    ).fetchall()
-
-    result = []
-    for r in rows:
-        domain = r[0]
-        if domain in excluded_domains or domain.endswith('.rockstreamer.com'):
-            continue
-        result.append({'domain': domain, 'cdn_name': r[1], 'total_hits': r[2] or 0, 'records': r[3], 'error_hits': r[4] or 0})
-
-    return result
-
-def cleanup_old_domain_hits():
-    cutoff = int(time.time()) - (180 * 86400)
-    conn.execute('DELETE FROM domain_hits WHERE ts < ?', (cutoff,))
-    conn.commit()
-    logger.info(f'Cleaned up domain hits older than 180 days')
 
 def get_latest_rows_by_cdn():
     cdns = get_configured_cdns()
@@ -485,7 +383,6 @@ def dashboard(token: Optional[str] = Cookie(None)):
     username = username_from_token(token)
     if not username:
         return RedirectResponse(url='/login', status_code=303)
-    cleanup_old_metrics()
     return f"""<!doctype html><html><head><title>CDN Monitor</title>
     <style>
     body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
@@ -527,7 +424,7 @@ def dashboard(token: Optional[str] = Cookie(None)):
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/domains'>Domains</a>
+        
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
@@ -567,6 +464,23 @@ def dashboard(token: Optional[str] = Cookie(None)):
         <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
           <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>Legend</div>
           <div id='legend' class='legend' style='display:flex;flex-direction:column;gap:6px;margin-top:0'></div>
+        </div>
+      </div>
+    </div>
+
+
+    <div class='panel'>
+      <h2>Real-time Bandwidth <span id='bwMeta' class='muted' style='font-size:13px;font-weight:400;margin-left:8px'></span></h2>
+      <div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:8px'>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
+          <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>TX (Upload / Egress)</div>
+          <div style='display:flex;gap:16px;margin-bottom:8px' id='bwTxStats'></div>
+          <div class='chart-wrap' style='height:200px;padding:0'><canvas id='bwTxChart'></canvas></div>
+        </div>
+        <div style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'>
+          <div style='font-size:12px;opacity:.7;margin-bottom:8px;font-weight:600'>RX (Download / Ingress)</div>
+          <div style='display:flex;gap:16px;margin-bottom:8px' id='bwRxStats'></div>
+          <div class='chart-wrap' style='height:200px;padding:0'><canvas id='bwRxChart'></canvas></div>
         </div>
       </div>
     </div>
@@ -828,6 +742,70 @@ def dashboard(token: Optional[str] = Cookie(None)):
     }}
 
     loadGraphs(); setInterval(loadGraphs, 5000);
+
+    function fmtBps(bps) {{
+      if (bps >= 1e9) return (bps/1e9).toFixed(2) + ' Gbps';
+      if (bps >= 1e6) return (bps/1e6).toFixed(2) + ' Mbps';
+      if (bps >= 1e3) return (bps/1e3).toFixed(1) + ' Kbps';
+      return bps + ' bps';
+    }}
+
+    let bwTxChart = null, bwRxChart = null;
+
+    function makeBwChart(id) {{
+      return new Chart(document.getElementById(id), {{
+        type: 'line',
+        data: {{ labels: [], datasets: [] }},
+        options: {{
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {{ legend: {{ display: true, position: 'bottom', labels: {{ color: '#8fc', font: {{ size: 11 }} }} }} }},
+          scales: {{
+            x: {{ ticks: {{ color: '#8fc', maxTicksLimit: 8, font: {{ size: 10 }} }}, grid: {{ color: '#1a2e3a' }} }},
+            y: {{ ticks: {{ color: '#8fc', font: {{ size: 10 }}, callback: v => fmtBps(v) }}, grid: {{ color: '#1a2e3a' }}, min: 0 }}
+          }}
+        }}
+      }});
+    }}
+
+    async function loadBandwidth() {{
+      try {{
+        const res = await fetch('/api/bandwidth?minutes=30');
+        const data = await res.json();
+        const series = data.series || {{}};
+        const cdns = Object.keys(series);
+        if (!cdns.length) return;
+        const allTs = [...new Set(cdns.flatMap(c => series[c].map(p => p.ts)))].sort();
+        const labels = allTs.map(ts => new Date(ts*1000).toLocaleTimeString([],{{hour:'2-digit',minute:'2-digit'}}));
+        const txD=[], rxD=[];
+        cdns.forEach((cdn,i) => {{
+          const col = palette[i % palette.length];
+          const m={{}};
+          series[cdn].forEach(p => {{ m[p.ts]=p; }});
+          txD.push({{label:cdn,data:allTs.map(t=>m[t]?m[t].tx_bps:null),borderColor:col,backgroundColor:col+'22',borderWidth:2,pointRadius:0,tension:0.3,fill:true,spanGaps:true}});
+          rxD.push({{label:cdn,data:allTs.map(t=>m[t]?m[t].rx_bps:null),borderColor:col,backgroundColor:col+'22',borderWidth:2,pointRadius:0,tension:0.3,fill:true,spanGaps:true}});
+        }});
+        if (!bwTxChart) bwTxChart = makeBwChart('bwTxChart');
+        bwTxChart.data.labels=labels; bwTxChart.data.datasets=txD; bwTxChart.update('none');
+        if (!bwRxChart) bwRxChart = makeBwChart('bwRxChart');
+        bwRxChart.data.labels=labels; bwRxChart.data.datasets=rxD; bwRxChart.update('none');
+        const txS=document.getElementById('bwTxStats'), rxS=document.getElementById('bwRxStats');
+        txS.replaceChildren(); rxS.replaceChildren();
+        cdns.forEach((cdn,i) => {{
+          const col=palette[i%palette.length], pts=series[cdn];
+          const mkB=(n,v) => {{
+            const d=document.createElement('div'); d.style.cssText='text-align:center';
+            d.innerHTML='<div style="font-size:10px;opacity:.6;color:'+col+'">'+n+'</div><div style="font-size:15px;font-weight:700;color:'+col+'">'+fmtBps(v)+'</div>';
+            return d;
+          }};
+          txS.appendChild(mkB(cdn, pts.length?pts[pts.length-1].tx_bps:0));
+          rxS.appendChild(mkB(cdn, pts.length?pts[pts.length-1].rx_bps:0));
+        }});
+        document.getElementById('bwMeta').textContent='Last 30 min \u00b7 1-min buckets \u00b7 auto-refresh 30s';
+      }} catch(e) {{ console.error('bw err',e); }}
+    }}
+
+    loadBandwidth(); setInterval(loadBandwidth, 30000);
+
     </script></body></html>"""
 
 @app.get('/map', response_class=HTMLResponse)
@@ -882,7 +860,7 @@ def map_page(token: Optional[str] = Cookie(None)):
       <div><h1 style='margin:0;font-size:20px'>CDN MAP</h1></div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/domains'>Domains</a>
+        
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
@@ -1050,7 +1028,7 @@ def management_page(token: Optional[str] = Cookie(None)):
       </div>
       <div class='navlinks'>
         <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/domains'>Domains</a>
+        
         <a class='badge' href='/map'>CDN MAP</a>
         <a class='badge' href='/history'>History</a>
         <a class='badge' href='/management'>Management</a>
@@ -1196,221 +1174,6 @@ INGEST_TOKEN=...</pre>
     refreshConfig();
     </script></body></html>""".replace('__USERNAME__', html.escape(username))
 
-@app.get('/domains', response_class=HTMLResponse)
-def domains_page(token: Optional[str] = Cookie(None)):
-    username = username_from_token(token)
-    if not username:
-        return RedirectResponse(url='/login', status_code=303)
-    return f"""<!doctype html><html><head><title>Domain Hits Analytics</title>
-    <style>
-    body{{font-family:Arial;background:#081018;color:#d8f7ff;padding:20px;margin:0}}
-    a{{color:#7fe8ff;text-decoration:none}}
-    a:hover{{text-decoration:underline}}
-    .wrap{{max-width:1600px;margin:0 auto}}
-    .nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}}
-    .navlinks{{display:flex;gap:14px;flex-wrap:wrap}}
-    .badge{{display:inline-block;padding:4px 10px;border:1px solid #1f3b4d;border-radius:999px;background:#0a1520}}
-    .panel{{background:#0a1520;border:1px solid #1f3b4d;border-radius:12px;padding:16px;margin-top:16px}}
-    .panel h2{{margin:0 0 12px 0;font-size:18px}}
-    .muted{{opacity:.75}}
-    .controls{{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}}
-    input,select{{background:#081018;color:#d8f7ff;border:1px solid #1f3b4d;padding:8px 12px;border-radius:6px}}
-    button{{background:#0f2a1e;color:#7bffad;border:1px solid #2c6a44;padding:8px 14px;border-radius:6px;cursor:pointer}}
-    button:hover{{background:#133523}}
-    .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin:16px 0}}
-    .card{{background:#081018;border:1px solid #1f3b4d;border-radius:12px;padding:12px;text-align:center}}
-    .card .label{{font-size:11px;opacity:.7;margin-bottom:4px}}
-    .card .value{{font-size:22px;font-weight:700;color:#7fe8ff}}
-    table{{border-collapse:collapse;width:100%;margin-top:12px}}
-    td,th{{border:1px solid #1f3b4d;padding:10px;text-align:left;font-size:13px}}
-    th{{background:#0d1e2e;color:#7fe8ff;font-weight:600}}
-    tr:hover td{{background:#0d1e2e}}
-    .empty{{padding:20px;text-align:center;opacity:.75}}
-    .error-rate{{color:#ff6b6b;font-weight:600}}
-    .status-ok{{color:#27d36b}}
-    .status-error{{color:#ff6b6b}}
-    </style>
-    </head><body><div class='wrap'>
-    <div class='nav'>
-      <div>
-        <h1 style='margin:0'>Domain Hits Analytics</h1>
-        <div class='muted' style='margin-top:6px'>6-month historical data with date filtering</div>
-      </div>
-      <div class='navlinks'>
-        <a class='badge' href='/'>Home</a>
-        <a class='badge' href='/domains'>Domains</a>
-        <a class='badge' href='/map'>CDN MAP</a>
-        <a class='badge' href='/history'>History</a>
-        <a class='badge' href='/management'>Management</a>
-        <a class='badge' href='/logout'>Logout ({html.escape(username)})</a>
-      </div>
-    </div>
-
-    <div class='panel'>
-      <h2>Filter & Query</h2>
-      <div class='controls'>
-        <input type='text' id='domainSearch' placeholder='Search domain name...' style='flex:1;max-width:300px'>
-        <label style='margin:0'>Range:
-          <select id='rangeSelect'>
-            <option value='24h'>Last 24 hours</option>
-            <option value='7d'>Last 7 days</option>
-            <option value='30d'>Last 30 days</option>
-            <option value='90d'>Last 90 days</option>
-            <option value='180d'>Last 180 days</option>
-          </select>
-        </label>
-        <label style='margin:0'>Or Custom: From <input type='date' id='fromDate'> To <input type='date' id='toDate'></label>
-        <button onclick='loadAnalytics()'>Apply Filter</button>
-      </div>
-      <span id='filterMeta' class='muted' style='font-size:12px'></span>
-    </div>
-
-    <div class='cards' id='summaryCards'></div>
-
-    <div class='panel'>
-      <h2>Domain Analytics</h2>
-      <div id='analyticsTable'></div>
-    </div>
-
-    <div class='panel'>
-      <h2>HTTP Status Code Distribution</h2>
-      <div style='display:grid;grid-template-columns:1fr 1fr;gap:20px'>
-        <div id='statusChart' style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px;min-height:200px'></div>
-        <div id='statusBreakdown' style='background:#081018;border:1px solid #1f3b4d;border-radius:10px;padding:12px'></div>
-      </div>
-    </div>
-
-    </div>
-    <script>
-    const state = {{ range: '24h', fromTs: null, toTs: null }};
-
-    async function getTimestampRange(){{
-      const now = Math.floor(Date.now() / 1000);
-      const rangeVal = document.getElementById('rangeSelect').value;
-      const fromDate = document.getElementById('fromDate').value;
-      const toDate = document.getElementById('toDate').value;
-
-      if(fromDate && toDate){{
-        state.fromTs = Math.floor(new Date(fromDate).getTime() / 1000);
-        state.toTs = Math.floor(new Date(toDate).getTime() / 1000) + 86400;
-      }} else {{
-        state.toTs = now;
-        const days = parseInt(rangeVal) || 1;
-        state.fromTs = now - (days * 86400);
-      }}
-    }}
-
-    async function loadAnalytics(){{
-      await getTimestampRange();
-      const from = new Date(state.fromTs * 1000).toLocaleDateString();
-      const to = new Date(state.toTs * 1000).toLocaleDateString();
-      document.getElementById('filterMeta').textContent = `Showing data from ${{from}} to ${{to}}`;
-
-      const res = await fetch(`/api/domain-analytics?from_ts=${{state.fromTs}}&to_ts=${{state.toTs}}`);
-      const data = await res.json();
-      const analytics = data.analytics || [];
-      renderSummary(analytics);
-      renderTable(analytics);
-      renderStatusBreakdown(analytics);
-    }}
-
-    function renderSummary(analytics){{
-      const summary = document.getElementById('summaryCards');
-      const searchTerm = document.getElementById('domainSearch').value.toLowerCase();
-      const filtered = analytics.filter(a => a.domain.toLowerCase().includes(searchTerm));
-      const totalHits = filtered.reduce((s, a) => s + (a.total_hits || 0), 0);
-      const totalErrors = filtered.reduce((s, a) => s + (a.error_hits || 0), 0);
-      const errorRate = totalHits ? Math.round((totalErrors / totalHits) * 100) : 0;
-
-      summary.replaceChildren();
-
-      const cards = [
-        ['Total Hits', totalHits.toLocaleString()],
-        ['Matching Domains', filtered.length.toString()],
-        ['Error Rate', errorRate + '%'],
-        ['Success Rate', (100 - errorRate) + '%']
-      ];
-
-      cards.forEach(([label, value]) => {{
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.innerHTML = '<div class="label">' + label + '</div><div class="value">' + value + '</div>';
-        summary.appendChild(card);
-      }});
-    }}
-
-    function renderTable(analytics){{
-      const table = document.getElementById('analyticsTable');
-      const searchTerm = document.getElementById('domainSearch').value.toLowerCase();
-      const filtered = analytics.filter(a => a.domain.toLowerCase().includes(searchTerm));
-
-      if(!filtered.length){{ table.innerHTML = '<div class="empty">No domain hits match your search.</div>'; return; }}
-
-      const t = document.createElement('table');
-      const head = document.createElement('tr');
-      ['Domain','CDN','Total Hits','Errors','Success Rate','Error Rate'].forEach(title => {{
-        const th = document.createElement('th');
-        th.textContent = title;
-        head.appendChild(th);
-      }});
-      t.appendChild(head);
-
-      filtered.forEach(a => {{
-        const errorRate = a.total_hits ? Math.round((a.error_hits / a.total_hits) * 100) : 0;
-        const successRate = 100 - errorRate;
-        const tr = document.createElement('tr');
-        const cells = [
-          a.domain,
-          a.cdn_name || '—',
-          a.total_hits.toLocaleString(),
-          '<span class="status-error">' + a.error_hits + '</span>',
-          '<span class="status-ok">' + successRate + '%</span>',
-          '<span class="error-rate">' + errorRate + '%</span>'
-        ];
-        cells.forEach(html => {{
-          const td = document.createElement('td');
-          td.innerHTML = html;
-          tr.appendChild(td);
-        }});
-        t.appendChild(tr);
-      }});
-      table.replaceChildren(t);
-    }}
-
-    function renderStatusBreakdown(analytics){{
-      const breakdown = document.getElementById('statusBreakdown');
-      const statusMap = {{}};
-      analytics.forEach(a => {{
-        const errorRate = a.total_hits ? Math.round((a.error_hits / a.total_hits) * 100) : 0;
-        statusMap['2xx Success'] = (statusMap['2xx Success'] || 0) + (a.total_hits - a.error_hits);
-        statusMap['4xx/5xx Errors'] = (statusMap['4xx/5xx Errors'] || 0) + a.error_hits;
-      }});
-
-      breakdown.replaceChildren();
-      Object.entries(statusMap).forEach(([status, count]) => {{
-        const div = document.createElement('div');
-        div.style.cssText = 'padding:8px;border-bottom:1px solid #1f3b4d';
-        const color = status.includes('Error') ? '#ff6b6b' : '#27d36b';
-        div.innerHTML = '<div style="color:' + color + ';font-weight:600">' + status + '</div>'
-          + '<div style="font-size:20px;font-weight:700;color:' + color + '">' + count.toLocaleString() + '</div>';
-        breakdown.appendChild(div);
-      }});
-    }}
-
-    // Initialize with last 24 hours
-    document.getElementById('rangeSelect').addEventListener('change', loadAnalytics);
-    document.getElementById('domainSearch').addEventListener('input', () => {{
-      // Re-render table and summary with current analytics data, filtered by search term
-      const res = fetch(`/api/domain-analytics?from_ts=${{state.fromTs}}&to_ts=${{state.toTs}}`);
-      res.then(r => r.json()).then(data => {{
-        const analytics = data.analytics || [];
-        renderSummary(analytics);
-        renderTable(analytics);
-        renderStatusBreakdown(analytics);
-      }});
-    }});
-    loadAnalytics();
-    </script></body></html>"""
 
 @app.get('/history', response_class=HTMLResponse)
 def history_page(token: Optional[str] = Cookie(None)):
@@ -1685,51 +1448,38 @@ def legacy_metrics(metric: LegacyMetricIn, x_api_key: Optional[str] = Header(Non
         raise HTTPException(status_code=401, detail='invalid api key')
     ts = int(datetime.fromisoformat(metric.timestamp.replace('Z', '+00:00')).timestamp()) if metric.timestamp else int(time.time())
     conn.execute(
-        'INSERT INTO metrics(ts, cdn_name, host, target_port, connection_count) VALUES (?, ?, ?, ?, ?)',
-        (ts, metric.server_id, metric.server_ip or '', 443, metric.connection_count)
+        'INSERT INTO metrics(ts, cdn_name, host, target_port, connection_count, tx_bps, rx_bps) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (ts, metric.server_id, metric.server_ip or '', 443, metric.connection_count, metric.tx_bps or 0, metric.rx_bps or 0)
     )
     conn.commit()
     return {'status': 'ok', 'ts': ts, 'cdn_name': metric.server_id}
 
-class DomainHitIn(BaseModel):
-    cdn_name: str
-    domain: str
-    status_code: int
-    hit_count: int = 1
-    request_path: Optional[str] = None
-    referer: Optional[str] = None
-    user_agent: Optional[str] = None
-    ts: Optional[int] = None
 
-@app.post('/api/domain-hits')
-def submit_domain_hits(hits: list[DomainHitIn], x_api_key: Optional[str] = Header(None)):
-    if x_api_key not in (TOKEN, LEGACY_API_KEY):
-        raise HTTPException(status_code=401, detail='invalid api key')
-    now = int(time.time())
-    for hit in hits:
-        ts = hit.ts or now
-        conn.execute(
-            'INSERT INTO domain_hits(ts, cdn_name, domain, status_code, hit_count, request_path, referer, user_agent) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            (ts, hit.cdn_name, hit.domain, hit.status_code, hit.hit_count, hit.request_path or '', hit.referer or '', hit.user_agent or '')
-        )
-    conn.commit()
-    cleanup_old_domain_hits()
-    return {'status': 'ok', 'count': len(hits)}
 
-@app.get('/api/domain-hits')
-def get_domain_hits(domain: str, from_ts: Optional[int] = None, to_ts: Optional[int] = None):
-    hits = query_domain_hits(domain, from_ts, to_ts)
-    return {'domain': domain, 'hits': hits}
 
-@app.get('/api/domain-analytics')
-def get_analytics(range: str = '24h', from_ts: Optional[int] = None, to_ts: Optional[int] = None):
-    if not from_ts or not to_ts:
-        spec = range_spec(range)
-        from_ts = spec['since']
-        to_ts = int(time.time())
-    analytics = get_domain_analytics(from_ts, to_ts)
-    return {'range': range, 'analytics': analytics, 'from': from_ts, 'to': to_ts}
+
+@app.get('/api/bandwidth')
+def bandwidth_history(cdn_name: str = None, minutes: int = 60):
+    since = int(time.time()) - minutes * 60
+    bucket = 60
+    if cdn_name:
+        rows = conn.execute(
+            'SELECT (ts/?) * ? AS bt, ROUND(AVG(tx_bps)) AS tx, ROUND(AVG(rx_bps)) AS rx '
+            'FROM metrics WHERE cdn_name=? AND ts>=? GROUP BY bt ORDER BY bt',
+            (bucket, bucket, cdn_name, since)
+        ).fetchall()
+        return {'cdn_name': cdn_name, 'points': [{'ts': int(r[0]), 'tx_bps': int(r[1] or 0), 'rx_bps': int(r[2] or 0)} for r in rows]}
+    cdns = [r[0] for r in conn.execute('SELECT DISTINCT cdn_name FROM metrics WHERE ts>=?', (since,)).fetchall()]
+    result = {}
+    for cdn in cdns:
+        rows = conn.execute(
+            'SELECT (ts/?) * ? AS bt, ROUND(AVG(tx_bps)) AS tx, ROUND(AVG(rx_bps)) AS rx '
+            'FROM metrics WHERE cdn_name=? AND ts>=? GROUP BY bt ORDER BY bt',
+            (bucket, bucket, cdn, since)
+        ).fetchall()
+        result[cdn] = [{'ts': int(r[0]), 'tx_bps': int(r[1] or 0), 'rx_bps': int(r[2] or 0)} for r in rows]
+    return {'series': result}
+
 
 @app.get('/api/latest')
 def latest():
@@ -1747,9 +1497,6 @@ def series(range: str = '24h'):
         series_data.setdefault(cdn_name, [])
     return {'range': range, 'label': spec['label'], 'stepLabel': spec['stepLabel'], 'series': series_data}
 
-@app.get('/api/domain-stats')
-def domain_stats():
-    return {'domains': get_domain_stats()}
 
 @app.get('/api/map-config')
 def map_config():
